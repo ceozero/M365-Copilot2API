@@ -28,6 +28,14 @@ export function AccountsPage({ push }: { push: Push }) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<"all" | "online" | "cooldown" | "offline">("all");
   const [loading, setLoading] = useState(true);
+  const [autoDisableCooldown, setAutoDisableCooldown] = useState(false);
+  const [policyBusy, setPolicyBusy] = useState(false);
+  const [rateCheckOpen, setRateCheckOpen] = useState(false);
+  const [rateCheckBusy, setRateCheckBusy] = useState(false);
+  const [rateCheckIDs, setRateCheckIDs] = useState<string[]>([]);
+  const [rateCheckModel, setRateCheckModel] = useState("gpt-6.1-sol");
+  const [disableLimited, setDisableLimited] = useState(true);
+  const [rateCheckResults, setRateCheckResults] = useState<{ id: string; status: string; disabled?: boolean; message?: string; category?: string; latencyMs?: number }[]>([]);
 
   const [callback, setCallback] = useState("");
   const [authState, setAuthState] = useState("");
@@ -70,6 +78,7 @@ export function AccountsPage({ push }: { push: Push }) {
     try {
       const d = await api("/api/accounts");
       setAccounts(d.accounts ?? []);
+      setAutoDisableCooldown(d.autoDisableCooldownAccounts === true);
     } catch (e: any) {
       push(String(e?.message ?? e), "error");
     } finally {
@@ -166,6 +175,58 @@ export function AccountsPage({ push }: { push: Push }) {
       await load();
     } catch (e: any) {
       push(String(e?.message ?? e), "error");
+    }
+  };
+
+  const openRateCheck = async () => {
+    if (!selection.size) { push(t("Select at least one account"), "error"); return; }
+    setRateCheckIDs([...selection]);
+    setRateCheckResults([]);
+    try {
+      const data = await api("/api/admin/models");
+      const ids: string[] = (data.data ?? []).map((model: { id: string }) => model.id).filter((id: string) => !/flux|image/i.test(id));
+      setTestModels(ids);
+      setRateCheckModel((current) => ids.includes(current) ? current : ids[0] ?? "");
+      setRateCheckOpen(true);
+    } catch (error: any) {
+      push(String(error?.message ?? error), "error");
+    }
+  };
+
+  const runRateCheck = async () => {
+    if (!rateCheckModel || rateCheckBusy) return;
+    if (disableLimited && !confirm(t("Run live requests for selected accounts and disable those confirmed as rate limited?"))) return;
+    setRateCheckBusy(true);
+    setRateCheckResults([]);
+    try {
+      for (const id of rateCheckIDs) {
+        setRateCheckResults((previous) => [...previous, { id, status: "checking" }]);
+        try {
+          const result = await api("/api/accounts/check-rate-limit", { method: "POST", body: JSON.stringify({ id, model: rateCheckModel, disableLimited }) });
+          setRateCheckResults((previous) => previous.map((entry) => entry.id === id ? { ...result, id } : entry));
+        } catch (error: any) {
+          setRateCheckResults((previous) => previous.map((entry) => entry.id === id ? { id, status: "error", message: String(error?.message ?? error) } : entry));
+        }
+      }
+    } finally {
+      setRateCheckBusy(false);
+      await load();
+    }
+  };
+
+  const setCooldownPolicy = async (enabled: boolean) => {
+    if (enabled && !confirm(t("Disable all currently cooling accounts and automatically disable future cooling accounts? Re-enable accounts manually after recovery."))) return;
+    setPolicyBusy(true);
+    try {
+      await api("/api/admin/settings", { method: "PUT", body: JSON.stringify({ autoDisableCooldownAccounts: enabled }) });
+      setAutoDisableCooldown(enabled);
+      push(t("Settings saved"), "success");
+      await load();
+    } catch (e: any) {
+      push(String(e?.message ?? e), "error");
+      await load();
+    } finally {
+      setPolicyBusy(false);
     }
   };
 
@@ -270,11 +331,15 @@ export function AccountsPage({ push }: { push: Push }) {
         </div>
         <div className="card-body" style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", borderBottom: "1px solid var(--line)" }}>
           <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5 }}>
+            <input type="checkbox" checked={autoDisableCooldown} disabled={loading || policyBusy} onChange={(event) => setCooldownPolicy(event.target.checked)} /> {t("Auto-disable cooling accounts")}
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5 }}>
             <input type="checkbox" checked={allSelected} onChange={(e) => toggleAll(e.target.checked)} /> {t("Select all")}
           </label>
           <span className="form-hint" style={{ margin: 0 }}>{selection.size} {t("selected")}</span>
           <button className="btn btn-sm" onClick={() => batch({ scheduling: true })}>{t("Enable sched")}</button>
           <button className="btn btn-sm danger" onClick={() => batch({ scheduling: false })}>{t("Disable sched")}</button>
+          <button className="btn btn-sm" disabled={!selection.size || rateCheckBusy} onClick={openRateCheck}><FlaskConical size={14} /> {t("Check rate limits")}</button>
           <button className="btn btn-sm" onClick={() => batch({ webSearch: true })}>{t("Search on")}</button>
           <button className="btn btn-sm danger" onClick={() => batch({ webSearch: false })}>{t("Search off")}</button>
           <input className="form-input" value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder={t("System prompt for selected…")} style={{ flex: 1, minWidth: 160, padding: "6px 10px", fontSize: 12 }} />
@@ -353,6 +418,43 @@ export function AccountsPage({ push }: { push: Push }) {
       </div>
 
       <AnimatePresence>
+        {rateCheckOpen && (
+          <Modal title={t("Check rate limits")} onClose={() => { if (!rateCheckBusy) setRateCheckOpen(false); }}>
+            <div className="form-group">
+              <label className="form-label">{t("Model")}</label>
+              <select className="form-input" value={rateCheckModel} disabled={rateCheckBusy} onChange={(event) => setRateCheckModel(event.target.value)}>
+                {testModels.map((model) => <option key={model} value={model}>{model}</option>)}
+              </select>
+            </div>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
+              <input type="checkbox" checked={disableLimited} disabled={rateCheckBusy} onChange={(event) => setDisableLimited(event.target.checked)} /> {t("Disable confirmed rate-limited accounts")}
+            </label>
+            <div style={{ maxHeight: 320, overflowY: "auto" }}>
+              {rateCheckIDs.map((id) => {
+                const account = accounts.find((entry) => entry.id === id);
+                const result = rateCheckResults.find((entry) => entry.id === id);
+                const status = result?.status === "healthy" ? "Healthy" : result?.status === "limited" ? "Rate limited" : result?.status === "error" ? "Failed" : result?.status === "checking" ? "Testing…" : "Pending";
+                return (
+                  <div key={id} style={{ padding: "10px 0", borderBottom: "1px solid var(--line)", overflowWrap: "anywhere" }}>
+                    <b>{account?.email || id}</b>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 4 }}>
+                      <span className={`status ${result?.status === "healthy" ? "online" : result?.status === "limited" ? "cooldown" : "offline"}`}><span className="dot" />{t(status)}</span>
+                      {result?.disabled ? <span>{t("Disabled")}</span> : null}
+                      {result?.latencyMs !== undefined ? <span>{result.latencyMs} ms</span> : null}
+                    </div>
+                    {result?.message ? <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>{result.category ? `${result.category}: ` : ""}{result.message}</div> : null}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="modal-actions">
+              <button className="btn" disabled={rateCheckBusy} onClick={() => setRateCheckOpen(false)}>{t("Close")}</button>
+              <button className="btn primary" disabled={rateCheckBusy || !rateCheckModel} onClick={runRateCheck}>
+                {rateCheckBusy ? t("Testing…") : <><Play size={14} /> {t("Check rate limits")}</>}
+              </button>
+            </div>
+          </Modal>
+        )}
         {testOpen && (
           <Modal title={t("Test models")} subtitle={t("Send a minimal request to verify a model")} onClose={() => setTestOpen(false)}>
             <div className="form-group">

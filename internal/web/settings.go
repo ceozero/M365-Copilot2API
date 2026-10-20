@@ -76,6 +76,7 @@ type runtimeSettings struct {
 	MaxConversationMessages           int            `json:"maxConversationMessages"`
 	LicenseType                       string         `json:"licenseType"`
 	AccountConcurrencyLimit           int            `json:"accountConcurrencyLimit"`
+	AutoDisableCooldownAccounts       bool           `json:"autoDisableCooldownAccounts"`
 	EnableMemoryV2                    bool           `json:"enableMemoryV2"`
 	EnableDeepWork                    bool           `json:"enableDeepWork"`
 	EnableComputerUse                 bool           `json:"enableComputerUse"`
@@ -293,6 +294,14 @@ func (s *Server) adminSettings(w http.ResponseWriter, r *http.Request) {
 		if e := s.settings.save(v); e != nil {
 			writeOpenAIError(w, 400, "invalid_request_error", e.Error())
 			return
+		}
+		if v.AutoDisableCooldownAccounts && s.tokens != nil {
+			for _, account := range s.tokens.List() {
+				if err := s.disableCoolingAccount(account.ID); err != nil {
+					writeOpenAIError(w, 500, "account_update_error", err.Error())
+					return
+				}
+			}
 		}
 		if e := outbound.ConfigurePool(v.ProxyPool); e != nil {
 			writeOpenAIError(w, 400, "invalid_request_error", e.Error())

@@ -84,6 +84,20 @@ func (s *Server) logThrottlingWarning(accountID string, throttling any) {
 	}
 }
 
+func (s *Server) disableCoolingAccount(accountID string) error {
+	if s.settings == nil || s.tokens == nil || s.accountPool == nil || !s.settings.get().AutoDisableCooldownAccounts {
+		return nil
+	}
+	if _, cooling := s.accountPool.CooldownUntil(accountID); !cooling || !s.tokens.ScheduleEnabled(accountID) {
+		return nil
+	}
+	if err := s.tokens.SetScheduleEnabled(accountID, false); err != nil {
+		return err
+	}
+	log.Printf("[account-policy] disabled cooling account=%s", accountID)
+	return nil
+}
+
 func (s *Server) markAccountResult(accountID string, err error) {
 	if s == nil || s.accountPool == nil || accountID == "" {
 		return
@@ -93,6 +107,12 @@ func (s *Server) markAccountResult(accountID string, err error) {
 		return
 	}
 	s.accountPool.MarkSuccess(accountID)
+}
+
+func (s *Server) handleAccountCooldown(accountID string) {
+	if err := s.disableCoolingAccount(accountID); err != nil {
+		log.Printf("[account-policy] disable cooling account=%s: %v", accountID, err)
+	}
 }
 
 // confirmRateLimitNotice verifies a text-channel rate-limit notice with a
@@ -234,7 +254,7 @@ func New() (*Server, error) {
 			sessionTTL = d
 		}
 	}
-	return &Server{
+	server := &Server{
 		tokens:             store,
 		accountPool:        newAccountHealth(),
 		accountConcurrency: newAccountConcurrency(),
@@ -261,7 +281,9 @@ func New() (*Server, error) {
 		generatedImages:      map[string]generatedImage{},
 		convCache:            newConversationCache(),
 		contextAffinity:      newContextAffinity(),
-	}, nil
+	}
+	server.accountPool.onCooldown = server.handleAccountCooldown
+	return server, nil
 }
 
 func (s *Server) StartConvCacheGC() {
@@ -527,6 +549,7 @@ func (s *Server) Routes() http.Handler {
 	m.HandleFunc("/api/accounts/schedule", s.scheduleAccount)
 	m.HandleFunc("/api/accounts/batch", s.batchAccounts)
 	m.HandleFunc("/api/accounts/token-health", s.tokenHealth)
+	m.HandleFunc("/api/accounts/check-rate-limit", s.checkAccountRateLimit)
 	m.HandleFunc("/api/accounts/clear-cooldown", s.clearCooldown)
 	m.HandleFunc("/api/accounts/delete", s.deleteAccount)
 	m.HandleFunc("/api/accounts/provision", s.provisionAccount)
@@ -896,7 +919,8 @@ func (s *Server) accounts(w http.ResponseWriter, r *http.Request) {
 			ExpiresAt: a.ExpiresAt, UpdatedAt: a.UpdatedAt, BoundProxy: a.BoundProxy,
 		})
 	}
-	jsonOut(w, map[string]any{"accounts": out, "health": s.accountPool.Snapshot()})
+	autoDisableCooldown := s.settings != nil && s.settings.get().AutoDisableCooldownAccounts
+	jsonOut(w, map[string]any{"accounts": out, "health": s.accountPool.Snapshot(), "autoDisableCooldownAccounts": autoDisableCooldown})
 }
 
 func (s *Server) refreshAccount(w http.ResponseWriter, r *http.Request) {
@@ -967,6 +991,108 @@ func (s *Server) batchAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOut(w, map[string]any{"status": "updated", "updated": n})
+}
+
+func confirmedAccountRateLimit(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, chathub.ErrRateLimitNotice) {
+		return true
+	}
+	var httpErr *UpstreamHTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.Status == http.StatusTooManyRequests || httpErr.ErrorCode == "ErrorUserThrottled" || httpErr.ErrorCode == "InsufficientTokens"
+	}
+	var dialErr *chathub.DialError
+	return errors.As(err, &dialErr) && (dialErr.Status == http.StatusTooManyRequests || dialErr.Kind == "QUOTA_429")
+}
+
+func (s *Server) applyAccountRateLimitProbe(accountID string, probeErr error, disableLimited bool) (bool, error) {
+	limited := confirmedAccountRateLimit(probeErr)
+	if probeErr != nil {
+		s.accountPool.recordFailure(accountID, probeErr, s.getRateLimitCooldown(), false)
+	} else {
+		s.accountPool.MarkSuccess(accountID)
+	}
+	if limited && disableLimited {
+		if err := s.tokens.SetScheduleEnabled(accountID, false); err != nil {
+			return limited, err
+		}
+	}
+	return limited, nil
+}
+
+func (s *Server) checkAccountRateLimit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
+		return
+	}
+	var body struct {
+		ID             string `json:"id"`
+		Model          string `json:"model"`
+		DisableLimited bool   `json:"disableLimited"`
+	}
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&body) != nil || strings.TrimSpace(body.ID) == "" || !isKnownPublicModel(body.Model) || isImageModel(body.Model) {
+		writeOpenAIError(w, 400, "invalid_request_error", "valid account id and chat model required")
+		return
+	}
+	account, exists := s.tokens.Get(strings.TrimSpace(body.ID))
+	if !exists {
+		writeOpenAIError(w, 404, "not_found", "account not found")
+		return
+	}
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+	probe := func() error {
+		fresh, err := s.tokens.EnsureValid(account.ID)
+		if err != nil {
+			return err
+		}
+		if fresh.OID == "" || fresh.TID == "" {
+			fresh.OID, fresh.TID = extractOIDTID(fresh.AccessToken)
+		}
+		release, err := s.accountConcurrency.Acquire(ctx, account.ID)
+		if err != nil {
+			return err
+		}
+		defer release()
+		cfg := s.settings.get()
+		tone, err := reasoningTone(body.Model, "")
+		if err != nil {
+			return err
+		}
+		scenario, license := effectiveScenarioAndLicense(body.Model, tone, cfg.Scenario, cfg.LicenseType)
+		s.accountPool.MarkCall(account.ID)
+		result, err := s.accountClient(account.ID).Chat(ctx, chathub.Account{AccessToken: fresh.AccessToken, OID: fresh.OID, TID: fresh.TID}, chathub.Request{
+			Text: rateLimitProbePrompt, Tone: tone, Started: true, LicenseType: license, Scenario: scenario, FeatureFlags: s.featureFlags(), DisableCodeInterpreter: true,
+		})
+		if result.ConversationID != "" {
+			s.dropTransientConversation(result.ConversationID)
+		}
+		return err
+	}
+	err := probe()
+	if errors.Is(err, chathub.ErrRateLimitNotice) {
+		err = probe()
+	}
+	category := ClassifyError(err)
+	limited, updateErr := s.applyAccountRateLimitProbe(account.ID, err, body.DisableLimited)
+	if updateErr != nil {
+		writeOpenAIError(w, 500, "account_update_error", updateErr.Error())
+		return
+	}
+	status := "healthy"
+	message := ""
+	if err != nil {
+		status = "error"
+		message = upstreamError(err)
+		if limited {
+			status = "limited"
+		}
+	}
+	jsonOut(w, map[string]any{"id": account.ID, "model": body.Model, "status": status, "rateLimited": limited, "disabled": !s.tokens.ScheduleEnabled(account.ID), "category": category, "message": message, "latencyMs": time.Since(started).Milliseconds()})
 }
 
 func (s *Server) tokenHealth(w http.ResponseWriter, r *http.Request) {

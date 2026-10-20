@@ -41,6 +41,13 @@ const dict: Record<string, Partial<Record<Locale, string>>> = {
   Running: { "zh-CN": "运行中", "zh-TW": "執行中", ja: "実行中", ko: "실행 중", es: "En ejecución", fr: "En cours", de: "Läuft", "pt-BR": "Em execução", ru: "Работает", ar: "قيد التشغيل" },
 
   // Accounts page
+  "Check rate limits": { "zh-CN": "检测限流", "zh-TW": "檢測限流" },
+  "Disable confirmed rate-limited accounts": { "zh-CN": "确认限流后禁用账号", "zh-TW": "確認限流後停用帳號" },
+  "Run live requests for selected accounts and disable those confirmed as rate limited?": { "zh-CN": "向所选账号发送真实请求，并禁用确认触发限流的账号？", "zh-TW": "向所選帳號傳送真實請求，並停用確認觸發限流的帳號？" },
+  "Rate limited": { "zh-CN": "已限流", "zh-TW": "已限流" },
+  Pending: { "zh-CN": "待检测", "zh-TW": "待檢測" },
+  "Auto-disable cooling accounts": { "zh-CN": "自动禁用冷却中的账号", "zh-TW": "自動停用冷卻中的帳號" },
+  "Disable all currently cooling accounts and automatically disable future cooling accounts? Re-enable accounts manually after recovery.": { "zh-CN": "立即禁用当前冷却中的账号，并自动禁用后续进入冷却的账号？故障恢复后需要手动重新启用账号。", "zh-TW": "立即停用目前冷卻中的帳號，並自動停用後續進入冷卻的帳號？故障恢復後需要手動重新啟用帳號。" },
   "Authorized accounts": { "zh-CN": "已授权账号", "zh-TW": "已授權帳號", ja: "承認済みアカウント", ko: "인증된 계정", es: "Cuentas autorizadas", fr: "Comptes autorisés", de: "Autorisierte Konten", "pt-BR": "Contas autorizadas", ru: "Авторизованные аккаунты", ar: "الحسابات المصرح بها" },
   "Select all": { "zh-CN": "全选", "zh-TW": "全選", ja: "すべて選択", ko: "모두 선택", es: "Seleccionar todo", fr: "Tout sélectionner", de: "Alle auswählen", "pt-BR": "Selecionar tudo", ru: "Выбрать все", ar: "تحديد الكل" },
   "0 selected": { "zh-CN": "已选 0 项", "zh-TW": "已選 0 項", ja: "0件選択", ko: "0개 선택", es: "0 seleccionados", fr: "0 sélectionné", de: "0 ausgewählt", "pt-BR": "0 selecionados", ru: "Выбрано 0", ar: "0 محدد" },
