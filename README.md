@@ -99,6 +99,8 @@ M365 Copilot2API 是一个用 Go 编写的自托管网关，把微软 365 Copilo
 
 从 [GitHub Releases](https://github.com/HEXUXIU/M365-Copilot2API/releases) 下载对应平台的二进制：
 
+Release 工作流会先构建管理后台，再将同一份前端产物嵌入各平台二进制（包括 Windows EXE）。更新控制台功能后，需要从包含这些修改的提交重新运行 Release 并替换运行中的二进制；无需在 Windows 客户端安装 Node.js。
+
 | 平台 | 架构 | 文件 |
 |------|------|------|
 | Linux | x86_64 / arm64 / i386 | `m365-copilot2api-linux-{amd64,arm64,386}` |
@@ -152,7 +154,23 @@ python manage.py stop     # 停止服务
 
 ### Docker 部署
 
-> 官方不提供 Dockerfile。如需容器化部署，可自行基于预编译二进制或源码构建镜像，或在 Discussions 交流社区方案。
+仓库提供 Dockerfile 和 Compose 配置。Docker 多阶段构建会先构建 React 前端，再将最新静态资源嵌入 Go 二进制，避免后端更新后控制台仍是旧版本。
+
+更新服务器上的源码后，在服务器项目目录执行：
+
+```bash
+docker compose up -d --build
+```
+
+如果直接部署二进制，请在服务器上依次构建前端和后端，再用新二进制替换旧服务并重启：
+
+```bash
+npm --prefix webapp ci
+npm --prefix webapp run build
+go build -o m365-copilot2api ./cmd/server
+```
+
+仅执行 `go build` 不会编译前端源码；修改控制台后必须先构建前端，否则会嵌入仓库中现有的旧静态资源。替换运行中的二进制时请先停止原服务，或构建到新文件名再切换。
 
 ### 初始化与第一次调用
 

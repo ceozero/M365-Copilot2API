@@ -1,9 +1,19 @@
+FROM node:22-alpine AS frontend
+
+WORKDIR /src/webapp
+COPY webapp/package.json webapp/package-lock.json ./
+RUN npm ci
+COPY webapp/index.html webapp/tsconfig.json webapp/vite.config.ts ./
+COPY webapp/src ./src
+RUN npm run build
+
 FROM golang:1.23-alpine AS build
 
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
+COPY --from=frontend /src/internal/web/web/webapp ./internal/web/web/webapp
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/m365-copilot2api ./cmd/server
 
 FROM alpine:3.20
