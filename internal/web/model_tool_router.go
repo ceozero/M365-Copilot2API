@@ -82,6 +82,9 @@ func parseModelToolDecision(text string, tools []map[string]any, choice any) ([]
 	if fenced := fencedToolCalls(text, tools, choice); len(fenced) > 0 {
 		return fenced, true
 	}
+	if calls, ok := extractToolCalls(text, tools, choice); ok {
+		return calls, true
+	}
 	// Fallback: try the old JSON format
 	if i := strings.Index(text, "```"); i >= 0 {
 		text = strings.TrimSpace(strings.TrimPrefix(strings.TrimSuffix(text[i+3:], "```"), "json"))
@@ -93,6 +96,14 @@ func parseModelToolDecision(text string, tools []map[string]any, choice any) ([]
 	var probe map[string]json.RawMessage
 	if json.Unmarshal([]byte(text[start:end+1]), &probe) != nil {
 		return nil, false
+	}
+	if _, ok := probe["calls"]; !ok {
+		var object map[string]any
+		if json.Unmarshal([]byte(text[start:end+1]), &object) == nil {
+			if call, ok := coerceToolCallEnvelope(object, tools, allowedToolNames(tools), choice, 0); ok {
+				return []detectedToolCall{call}, true
+			}
+		}
 	}
 	if _, ok := probe["calls"]; !ok {
 		return nil, false

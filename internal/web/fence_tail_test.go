@@ -3,6 +3,7 @@ package web
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func collect(t *testing.T, frags []string, hold func(string) bool) string {
@@ -114,5 +115,119 @@ func TestFenceStreamRegressionGuard(t *testing.T) {
 	out, held := fenceStream("", "a```x\ny\n```TAIL", 3, neverHold)
 	if !strings.Contains(out, "TAIL") {
 		t.Fatalf("tail dropped: emitted=%q held=%q", out, held)
+	}
+}
+
+func TestFenceStreamToolProtocolsNeverLeakAcrossFragments(t *testing.T) {
+	tools := []map[string]any{{"type": "function", "function": map[string]any{"name": "read_file"}}}
+	hold := func(text string) bool { return isToolProtocolText(text, tools, "auto") }
+	for _, protocol := range []string{
+		"```tool_call\n{\"name\":\"read_file\",\"arguments\":{\"filePath\":\"/tmp/private.txt\"}}\n```",
+		"```json\n{\"calls\":[{\"name\":\"read_file\",\"arguments\":{\"filePath\":\"/tmp/private.txt\"}}]}\n```",
+		`{"name":"read_file","arguments":{"filePath":"/tmp/private.txt"}}`,
+		`CALL_TOOL: read_file({"filePath":"/tmp/private.txt"})`,
+		`call_tool: read_file({"filePath":"/tmp/private.txt"})`,
+		`<m365-tool-call>{"name":"read_file","arguments":{"filePath":"/tmp/private.txt"}}</m365-tool-call>`,
+	} {
+		text := "我先读取文件。ı\n" + protocol + "\nThen continue."
+		for split := 0; split <= len(text); split++ {
+			pending, output := "", ""
+			for _, fragment := range []string{text[:split], text[split:]} {
+				emitted, held := fenceStream(pending, fragment, 3, hold)
+				output += emitted
+				pending = held
+				if !utf8.ValidString(emitted) {
+					t.Fatalf("invalid UTF-8 at split %d: %q", split, emitted)
+				}
+			}
+			if strings.Contains(output, "private.txt") || strings.Contains(output, "read_file") {
+				t.Fatalf("tool protocol leaked at split %d: %q", split, output)
+			}
+			if !strings.Contains(output, "我先读取文件。") || !strings.Contains(pending, protocol) {
+				t.Fatalf("lost prose or tool protocol at split %d: output=%q pending=%q", split, output, pending)
+			}
+			calls, ok := parseModelToolDecision(pending, tools, "auto")
+			if !ok || len(calls) != 1 || calls[0].Name != "read_file" {
+				t.Fatalf("held protocol cannot become a tool call: %q", pending)
+			}
+		}
+	}
+}
+
+func TestFenceStreamToolProtocolArrivesByteByByte(t *testing.T) {
+	tools := []map[string]any{{"type": "function", "function": map[string]any{"name": "read_file"}}}
+	text := "Reading.\ncall_tool: read_file({\"filePath\":\"/tmp/private.txt\"})\n"
+	pending, output := "", ""
+	for offset := range text {
+		emitted, held := fenceStream(pending, text[offset:offset+1], 3, func(candidate string) bool {
+			return isToolProtocolText(candidate, tools, "auto")
+		})
+		output += emitted
+		pending = held
+	}
+	if strings.Contains(output, "read_file") || strings.Contains(output, "private.txt") {
+		t.Fatalf("tool protocol leaked: %q", output)
+	}
+	if calls, ok := parseModelToolDecision(pending, tools, "auto"); !ok || len(calls) != 1 {
+		t.Fatalf("tool protocol was lost: %q", pending)
+	}
+}
+
+func TestFenceStreamToolArgumentsContainBackticks(t *testing.T) {
+	tools := []map[string]any{{"type": "function", "function": map[string]any{"name": "write_file"}}}
+	protocol := "```tool_call\n{\"name\":\"write_file\",\"arguments\":{\"content\":\"```json\\nsecret\\n```\"}}\n```"
+	for split := 0; split <= len(protocol); split++ {
+		pending, output := "", ""
+		for _, fragment := range []string{protocol[:split], protocol[split:]} {
+			emitted, held := fenceStream(pending, fragment, 3, func(candidate string) bool {
+				return isToolProtocolText(candidate, tools, "auto")
+			})
+			output += emitted
+			pending = held
+		}
+		if output != "" || pending != protocol {
+			t.Fatalf("tool arguments leaked at split %d: output=%q pending=%q", split, output, pending)
+		}
+	}
+}
+
+func TestFenceStreamScansToolsAfterOrdinaryCodeBlock(t *testing.T) {
+	tools := []map[string]any{{"type": "function", "function": map[string]any{"name": "read_file"}}}
+	text := "```text\nordinary example\n```\n```read_file\n{\"filePath\":\"/tmp/private.txt\"}\n```\n```read_file\n{\"filePath\":\"/tmp/second.txt\"}\n```"
+	emitted, held := fenceStream("", text, 3, func(text string) bool { return isToolProtocolText(text, tools, "auto") })
+	if !strings.Contains(emitted, "ordinary example") || strings.Contains(emitted, "private.txt") || strings.Contains(emitted, "second.txt") {
+		t.Fatalf("unexpected prose: %q", emitted)
+	}
+	if calls := fencedToolCalls(held, tools, "auto"); len(calls) != 2 {
+		t.Fatalf("expected two retained calls, got %d", len(calls))
+	}
+}
+
+func TestFenceStreamPreservesOrdinaryJSONAndCode(t *testing.T) {
+	tools := []map[string]any{{"type": "function", "function": map[string]any{"name": "read_file"}}}
+	hold := func(text string) bool { return isToolProtocolText(text, tools, "auto") }
+	for _, text := range []string{
+		"普通回答。\n```json\n{\"answer\":42}\n```\nDone.",
+		"Result: {\"answer\":42}.\n```text\nhello\n```\nDone.",
+		"An undeclared tool example: {\"name\":\"unknown\",\"arguments\":{}}.",
+	} {
+		for split := 0; split <= len(text); split++ {
+			if got := collect(t, []string{text[:split], text[split:]}, hold); got != text {
+				t.Fatalf("ordinary content changed at split %d: got=%q want=%q", split, got, text)
+			}
+		}
+	}
+}
+
+func TestFenceStreamPreservesProtocolWhenToolsAreDisabled(t *testing.T) {
+	tools := []map[string]any{{"type": "function", "function": map[string]any{"name": "read_file"}}}
+	text := "Example: {\"name\":\"read_file\",\"arguments\":{\"filePath\":\"example.txt\"}}"
+	for split := 0; split <= len(text); split++ {
+		got := collect(t, []string{text[:split], text[split:]}, func(candidate string) bool {
+			return isToolProtocolText(candidate, tools, "none")
+		})
+		if got != text {
+			t.Fatalf("content changed with tools disabled at split %d: %q", split, got)
+		}
 	}
 }

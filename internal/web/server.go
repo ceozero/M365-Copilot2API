@@ -2760,7 +2760,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 			// block or prose is released immediately and in order so the user
 			// sees step-by-step streaming output.
 			hold := func(fence string) bool {
-				return len(fencedToolCalls(fence, toolMaps, body.ToolChoice)) > 0
+				return isToolProtocolText(fence, toolMaps, body.ToolChoice)
 			}
 			emitted, held := fenceStream(pending.String(), ev.Text, 3, hold)
 			if err := emitText(emitted); err != nil {
@@ -2804,7 +2804,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 						return nil
 					}
 					hold := func(fence string) bool {
-						return len(fencedToolCalls(fence, toolMaps, body.ToolChoice)) > 0
+						return isToolProtocolText(fence, toolMaps, body.ToolChoice)
 					}
 					emitted, held := fenceStream(pending.String(), ev.Text, 3, hold)
 					if err := emitText(emitted); err != nil {
@@ -2869,7 +2869,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 						return nil
 					}
 					hold := func(fence string) bool {
-						return len(fencedToolCalls(fence, toolMaps, body.ToolChoice)) > 0
+						return isToolProtocolText(fence, toolMaps, body.ToolChoice)
 					}
 					emitted, held := fenceStream(pending.String(), ev.Text, 3, hold)
 					if err := emitText(emitted); err != nil {
