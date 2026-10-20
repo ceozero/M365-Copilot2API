@@ -48,7 +48,7 @@ export function AccountsPage({ push }: { push: Push }) {
         const ids = (d.data ?? []).map((m: any) => m.id);
         setTestModels(ids);
         setTestModel((prev) => prev || ids[0] || "");
-      } catch {}
+      } catch { }
     }
   };
 

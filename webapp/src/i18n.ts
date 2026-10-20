@@ -285,7 +285,7 @@ export function setLocale(l: Locale) {
   current = l;
   try {
     localStorage.setItem("m365_locale", l);
-  } catch {}
+  } catch { }
 }
 
 export function getLocale(): Locale {
@@ -296,7 +296,7 @@ export function detectLocale(): Locale {
   try {
     const saved = localStorage.getItem("m365_locale") as Locale | null;
     if (saved && LOCALES.some((l) => l.id === saved)) return saved;
-  } catch {}
+  } catch { }
   const nav = navigator.language;
   if (LOCALES.some((l) => l.id === nav)) return nav as Locale;
   if (nav.startsWith("zh")) return nav.includes("TW") || nav.includes("HK") ? "zh-TW" : "zh-CN";
