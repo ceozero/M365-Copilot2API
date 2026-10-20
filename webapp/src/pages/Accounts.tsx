@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { AnimatePresence } from "motion/react";
 import { FlaskConical, Play } from "lucide-react";
 import { api } from "../api";
@@ -33,8 +33,6 @@ export function AccountsPage({ push }: { push: Push }) {
   const [authState, setAuthState] = useState("");
   const [authMsg, setAuthMsg] = useState<{ kind: "info" | "success" | "error"; text: string } | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
-  const popupRef = useRef<Window | null>(null);
-
   const [testOpen, setTestOpen] = useState(false);
   const [testModels, setTestModels] = useState<string[]>([]);
   const [testModel, setTestModel] = useState("");
@@ -87,13 +85,8 @@ export function AccountsPage({ push }: { push: Push }) {
     try {
       const d = await api("/api/auth/start");
       setAuthState(d.state ?? "");
-      const popup = window.open(d.url, "pkce", "width=600,height=800");
-      popupRef.current = popup;
-      if (!popup) {
-        setAuthMsg({ kind: "error", text: t("Popup blocked — allow popups and try again") });
-        return;
-      }
-      setAuthMsg({ kind: "info", text: t("Sign in the popup, then paste the full callback URL below") });
+      await api(`/api/auth/launch?state=${encodeURIComponent(d.state ?? "")}`, { method: "POST" });
+      setAuthMsg({ kind: "info", text: t("Sign in the private browser window, then paste the full callback URL below") });
     } catch (e: any) {
       push(String(e?.message ?? e), "error");
     }
@@ -203,8 +196,8 @@ export function AccountsPage({ push }: { push: Push }) {
         <div className="card-body">
           <div className="onb-steps" style={{ marginBottom: 16 }}>
             {[
-              { n: 1, title: t("Click Start authorization below"), sub: t("A popup opens the Microsoft sign-in page.") },
-              { n: 2, title: t("Sign in, then copy the address-bar URL from the popup"), sub: t("The popup ends on a blank or error page — that is normal. Copy the whole URL, including the code and state parameters.") },
+              { n: 1, title: t("Click Start authorization below"), sub: t("A private browser window opens the Microsoft sign-in page.") },
+              { n: 2, title: t("Sign in, then copy the address-bar URL from the private window"), sub: t("The window ends on a blank or error page — that is normal. Copy the whole URL, including the code and state parameters.") },
               { n: 3, title: t("Paste that long URL and confirm"), sub: t("Paste it into the callback field and click Confirm and add.") },
             ].map((s) => (
               <div className="onb-step" key={s.n}>

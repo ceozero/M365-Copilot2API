@@ -532,6 +532,7 @@ func (s *Server) Routes() http.Handler {
 	m.HandleFunc("/api/accounts/provision", s.provisionAccount)
 	m.HandleFunc("/api/accounts/bind-proxy", s.bindProxy)
 	m.HandleFunc("/api/auth/start", s.startPKCE)
+	m.HandleFunc("/api/auth/launch", s.launchPKCE)
 	m.HandleFunc("/api/auth/status", s.pkceStatus)
 	m.HandleFunc("/api/auth/callback", s.callbackPKCE)
 	m.HandleFunc("/api/chat", s.chatOnce)
@@ -1136,6 +1137,42 @@ func (s *Server) startPKCE(w http.ResponseWriter, _ *http.Request) {
 		"redirectUri": redirectURI,
 		"note":        "If redirect is nativeclient, paste the final URL/code into /api/auth/callback after login.",
 	})
+}
+
+func (s *Server) launchPKCE(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
+		return
+	}
+	state := r.URL.Query().Get("state")
+	if state == "" {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "missing state")
+		return
+	}
+	s.mu.Lock()
+	p, ok := s.pkce[state]
+	if ok && time.Since(p.Created) > 10*time.Minute {
+		delete(s.pkce, state)
+		ok = false
+	}
+	s.mu.Unlock()
+	if !ok {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "unknown or expired state")
+		return
+	}
+
+	if err := launchPrivateBrowser(auth.AuthorizationURL(
+		auth.AuthorizeEndpoint(),
+		auth.ClientID(),
+		p.RedirectURI,
+		state,
+		auth.Challenge(p.Verifier),
+		auth.Scope(),
+	)); err != nil {
+		writeOpenAIError(w, http.StatusInternalServerError, "browser_launch_failed", err.Error())
+		return
+	}
+	jsonOut(w, map[string]any{"ok": true})
 }
 
 func (s *Server) pkceStatus(w http.ResponseWriter, r *http.Request) {
