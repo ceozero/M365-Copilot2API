@@ -17,6 +17,10 @@ func modelToolRouterPrompt(prompt string, tools []map[string]any, choice any) st
 - When the user asks you to implement, modify, enhance, fix, create, or inspect code/files (e.g. "去增强吧", "去干活", "去改代码", "go implement it"), you MUST emit a CALL_TOOL: line to inspect or modify the target files rather than returning NO_TOOL_NEEDED
 - The caller's local environment executes the tool; do NOT run any cloud Python/bash sandbox or /mnt/data yourself, and never refuse local paths
 - Output ONLY the CALL_TOOL: ... line(s) or NO_TOOL_NEEDED without extra explanation`
+	if toolChoiceRequiresCall(choice) {
+		selection, _ := json.Marshal(choice)
+		rules += "\n- A tool call is mandatory. Honor this tool_choice exactly: " + string(selection) + ". Do not return NO_TOOL_NEEDED."
+	}
 	// Multi-turn: completed tool evidence (tool[...], tool_calls:) was already
 	// acted upon, so re-invoking those tools would duplicate work.
 	if strings.Contains(prompt, "tool_calls:") || strings.Contains(prompt, "tool[call_") {

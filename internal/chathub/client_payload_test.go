@@ -53,3 +53,20 @@ func TestChatPayloadCodeInterpreterOptions(t *testing.T) {
 		})
 	}
 }
+
+func TestToolProtocolPromptDescribesCallerExecutionAndSchema(t *testing.T) {
+	tools := []Tool{{Type: "function", Function: json.RawMessage(`{"name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"},"days":{"type":"integer"}},"required":["city","days"]}}`)}}
+	prompt := toolProtocolPrompt("Weather in Berlin", tools, "required", false)
+	for _, expected := range []string{
+		"external caller tools",
+		"not in your cloud runtime",
+		"fenced tool_call JSON block",
+		`tool_choice is "required"`,
+		`"days":{"type":"integer"}`,
+		`"required":["city","days"]`,
+	} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("tool protocol prompt is missing %q", expected)
+		}
+	}
+}

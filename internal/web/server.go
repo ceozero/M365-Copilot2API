@@ -2627,6 +2627,9 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 				return nil
 			}
 			text.WriteString(ev.Text)
+			if len(toolMaps) > 0 && toolChoiceRequiresCall(body.ToolChoice) {
+				return nil
+			}
 			// Hold back only a fence that is a real tool call; an ordinary code
 			// block or prose is released immediately and in order so the user
 			// sees step-by-step streaming output.
@@ -2671,6 +2674,9 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 						return nil
 					}
 					text.WriteString(ev.Text)
+					if len(toolMaps) > 0 && toolChoiceRequiresCall(body.ToolChoice) {
+						return nil
+					}
 					hold := func(fence string) bool {
 						return len(fencedToolCalls(fence, toolMaps, body.ToolChoice)) > 0
 					}
@@ -2733,6 +2739,9 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 						return nil
 					}
 					text.WriteString(ev.Text)
+					if len(toolMaps) > 0 && toolChoiceRequiresCall(body.ToolChoice) {
+						return nil
+					}
 					hold := func(fence string) bool {
 						return len(fencedToolCalls(fence, toolMaps, body.ToolChoice)) > 0
 					}
@@ -2827,12 +2836,13 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 		}
 		calls, rejected := validateCalls("stream", rawCalls)
 		toolResult := chathub.Result{Text: fullCandidateText}
-		if len(calls) == 0 && rejected > 0 {
+		if len(calls) == 0 && len(toolMaps) > 0 && fmt.Sprint(body.ToolChoice) != "none" &&
+			(rejected > 0 || toolChoiceRequiresCall(body.ToolChoice) || isToolRefusal(fullCandidateText)) {
 			// A native ChatHub event can contain a fabricated or empty tool name.
 			// Do not leak it to the local runner: ask the model to remap the intent
 			// to exactly one of the tools the client actually declared.
-			repairPrompt := modelToolRouterPrompt(prompt+"\n"+ledger.RouterContext(), toolMaps, "required") +
-				"\nREPAIR RULE: The previous upstream event selected an undeclared tool. Select one declared tool that performs the intended operation. Never return unknown_tool."
+			repairPrompt := modelToolRouterPrompt(prompt+"\n"+activeLedger.RouterContext(), toolMaps, body.ToolChoice) +
+				"\nREPAIR RULE: The previous response did not produce a valid caller tool call. Select a tool from the declared list that satisfies tool_choice. These tools execute on the caller, not in the cloud sandbox. Return a CALL_TOOL: line, not a statement about tool availability."
 			repairRes, repairErr := s.chatWithAccount(ctx, acc.ID, account, chathub.Request{Text: repairPrompt, Tone: tone, Attachments: body.Attachments, LicenseType: toolCfg.LicenseType, Scenario: toolCfg.Scenario, DisableCodeInterpreter: true})
 			if repairErr == nil {
 				repaired, parsed := parseModelToolDecision(repairRes.Text, toolMaps, body.ToolChoice)
@@ -2845,7 +2855,11 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 			}
 			if len(calls) == 0 {
 				log.Printf("[tool-validation] id=%s stage=stream-repair failed", requestID)
-				_ = sseRaw(r.Context(), w, flusher, "data: "+mustJSON(map[string]any{"error": map[string]any{"message": "upstream selected an undeclared tool and repair failed", "code": "invalid_tool_call"}})+"\n\n")
+				if !sw.isCommitted() {
+					writeOpenAIError(w, http.StatusBadGateway, "invalid_tool_call", "model did not select a valid tool after constrained retry")
+					return
+				}
+				_ = sseRaw(r.Context(), w, flusher, "data: "+mustJSON(map[string]any{"error": map[string]any{"message": "model did not select a valid tool after constrained retry", "code": "invalid_tool_call"}})+"\n\n")
 				_ = sseRaw(r.Context(), w, flusher, "data: [DONE]\n\n")
 				return
 			}
@@ -3330,7 +3344,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 	// and honor an explicit tool_choice=required that the model answered with
 	// prose instead of a call. A plain text answer with tool_choice=auto is a
 	// legitimate "no tool" decision and never triggers a second model call.
-	if (invalidDetectedTool || fmt.Sprint(body.ToolChoice) == "required") && len(toolMaps) > 0 && fmt.Sprint(body.ToolChoice) != "none" {
+	if (invalidDetectedTool || toolChoiceRequiresCall(body.ToolChoice)) && len(toolMaps) > 0 && fmt.Sprint(body.ToolChoice) != "none" {
 		routePrompt := modelToolRouterPrompt(prompt+"\n"+activeLedger.RouterContext(), toolMaps, body.ToolChoice)
 		routeRes, routeErr := s.chatWithAccount(ctx, acc.ID, account, chathub.Request{Text: routePrompt, Tone: tone, Attachments: body.Attachments, LicenseType: toolCfg.LicenseType, Scenario: toolCfg.Scenario, DisableCodeInterpreter: true})
 		if routeErr == nil {
@@ -3352,7 +3366,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if fmt.Sprint(body.ToolChoice) == "required" {
+		if toolChoiceRequiresCall(body.ToolChoice) {
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_error", "model did not select a required tool after constrained retry")
 			return
 		}
