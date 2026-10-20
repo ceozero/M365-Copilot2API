@@ -33,6 +33,8 @@ export function AccountsPage({ push }: { push: Push }) {
   const [authState, setAuthState] = useState("");
   const [authMsg, setAuthMsg] = useState<{ kind: "info" | "success" | "error"; text: string } | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
+  const [authStarting, setAuthStarting] = useState(false);
+  const [authURL, setAuthURL] = useState("");
   const [testOpen, setTestOpen] = useState(false);
   const [testModels, setTestModels] = useState<string[]>([]);
   const [testModel, setTestModel] = useState("");
@@ -82,13 +84,33 @@ export function AccountsPage({ push }: { push: Push }) {
   }, [load]);
 
   const startAuth = async () => {
+    const popup = window.open("about:blank", "pkce", "width=600,height=800");
+    setAuthStarting(true);
+    setAuthURL("");
     try {
       const d = await api("/api/auth/start");
       setAuthState(d.state ?? "");
-      await api(`/api/auth/launch?state=${encodeURIComponent(d.state ?? "")}`, { method: "POST" });
-      setAuthMsg({ kind: "info", text: t("Sign in the private browser window, then paste the full callback URL below") });
+      setAuthURL(d.url);
+      try {
+        if (!["localhost", "127.0.0.1", "[::1]"].includes(window.location.hostname)) {
+          throw new Error("remote console");
+        }
+        await api(`/api/auth/launch?state=${encodeURIComponent(d.state ?? "")}`, { method: "POST" });
+        popup?.close();
+        setAuthMsg({ kind: "info", text: t("Sign in the private browser window, then paste the full callback URL below") });
+      } catch {
+        if (popup && !popup.closed) {
+          popup.location.href = d.url;
+          setAuthMsg({ kind: "info", text: t("Private launch unavailable. Opened a normal authorization window instead.") });
+        } else {
+          setAuthMsg({ kind: "error", text: t("Popup blocked — allow popups and try again") });
+        }
+      }
     } catch (e: any) {
+      popup?.close();
       push(String(e?.message ?? e), "error");
+    } finally {
+      setAuthStarting(false);
     }
   };
 
@@ -206,7 +228,7 @@ export function AccountsPage({ push }: { push: Push }) {
               </div>
             ))}
           </div>
-          <button className="btn primary" style={{ width: "100%", marginBottom: 12 }} onClick={startAuth}>
+          <button className="btn primary" style={{ width: "100%", marginBottom: 12 }} disabled={authStarting} onClick={startAuth}>
             {t("Start authorization")}
           </button>
           <label className="form-label">{t("Callback URL")}</label>
@@ -225,6 +247,7 @@ export function AccountsPage({ push }: { push: Push }) {
           {authMsg ? (
             <div className={msgClass} style={{ marginTop: 12 }}>
               <div className="highlight-box-title">{authMsg.text}</div>
+              {authURL ? <a href={authURL} target="_blank" rel="noopener noreferrer">{t("Open authorization page")}</a> : null}
             </div>
           ) : null}
           <input type="hidden" value={authState} readOnly />
