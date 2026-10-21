@@ -134,6 +134,45 @@ func TestIncrementalSliceKeepsFreshUserTurnAtHistoryLength(t *testing.T) {
 // as `return 'Create a basic Snake game implementation in the workspace';` to
 // the executor ran a no-op command, so the harness reported a file that was
 // never created.
+func TestIncrementalPromptPreservesWorkspaceContext(t *testing.T) {
+	msgs := []oaiMsg{
+		{Role: "system", Content: "Use the caller's workspace tools."},
+		{Role: "developer", Content: "Do not build or run tests."},
+		{Role: "user", Content: "<workspace_info>Current project: /caller/project</workspace_info>\n<environment_info>OS: Windows</environment_info>\n<editorContext>src/main.ts</editorContext>\nInspect this project."},
+		{Role: "assistant", Content: "Earlier answer."},
+		{Role: "user", Content: "What does this project use for vision?"},
+	}
+	flat, _ := flattenPromptMessages(incrementalPromptMessages(msgs, 4), nil)
+	for _, want := range []string{"Use the caller's workspace tools.", "Do not build or run tests.", "/caller/project", "OS: Windows", "src/main.ts", "What does this project use for vision?"} {
+		if !strings.Contains(flat, want) {
+			t.Fatalf("incremental prompt lost %q: %s", want, flat)
+		}
+	}
+	for _, unwanted := range []string{"Inspect this project.", "Earlier answer."} {
+		if strings.Contains(flat, unwanted) {
+			t.Fatalf("incremental prompt replayed old conversation %q: %s", unwanted, flat)
+		}
+	}
+}
+
+func TestIncrementalPromptPreservesToolContinuationAndContext(t *testing.T) {
+	msgs := []oaiMsg{
+		{Role: "system", Content: "Workspace: /caller/project"},
+		{Role: "user", Content: "Inspect the vision implementation."},
+		{Role: "assistant", ToolCalls: []map[string]any{{"id": "call_read", "type": "function", "function": map[string]any{"name": "read_file", "arguments": "{}"}}}},
+		{Role: "tool", ToolCallID: "call_read", Content: "Vision implementation evidence."},
+	}
+	flat, _ := flattenPromptMessages(incrementalPromptMessages(msgs, 3), nil)
+	for _, want := range []string{"Workspace: /caller/project", "Inspect the vision implementation.", "[assistant tool_calls]", "[tool result id=call_read]", "Vision implementation evidence.", "[continuation]"} {
+		if strings.Count(flat, want) != 1 && want != "Inspect the vision implementation." {
+			t.Fatalf("expected one occurrence of %q: %s", want, flat)
+		}
+		if !strings.Contains(flat, want) {
+			t.Fatalf("continuation lost %q: %s", want, flat)
+		}
+	}
+}
+
 func TestFencedLanguageStubIsNotAToolCall(t *testing.T) {
 	tools := []map[string]any{{
 		"type": "function",

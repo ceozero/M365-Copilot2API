@@ -12,11 +12,16 @@ func modelToolRouterPrompt(prompt string, tools []map[string]any, choice any) st
 	rules := `- If a tool is needed, respond with: CALL_TOOL: tool_name({"arg1":"value1"})
 - If no tool is needed, respond with: NO_TOOL_NEEDED
 - Only use tools from the available list above
+- Resolve references to the current project from the supplied history, workspace and environment context. For questions about project implementation, use an available read/search/list tool before answering; do not ask for a project name or path already supplied. Do not invent a workspace path or claim access without tool results.
 - Validate all arguments against the tool's schema
 - Do not invent tools that are not in the list
 - When the user asks you to implement, modify, enhance, fix, create, or inspect code/files (e.g. "去增强吧", "去干活", "去改代码", "go implement it"), you MUST emit a CALL_TOOL: line to inspect or modify the target files rather than returning NO_TOOL_NEEDED
 - The caller's local environment executes the tool; do NOT run any cloud Python/bash sandbox or /mnt/data yourself, and never refuse local paths
 - Output ONLY the CALL_TOOL: ... line(s) or NO_TOOL_NEEDED without extra explanation`
+	if toolChoiceRequiresCall(choice) {
+		selection, _ := json.Marshal(choice)
+		rules += "\n- A tool call is mandatory. Honor this tool_choice exactly: " + string(selection) + ". Do not return NO_TOOL_NEEDED."
+	}
 	// Multi-turn: completed tool evidence (tool[...], tool_calls:) was already
 	// acted upon, so re-invoking those tools would duplicate work.
 	if strings.Contains(prompt, "tool_calls:") || strings.Contains(prompt, "tool[call_") {
@@ -78,6 +83,9 @@ func parseModelToolDecision(text string, tools []map[string]any, choice any) ([]
 	if fenced := fencedToolCalls(text, tools, choice); len(fenced) > 0 {
 		return fenced, true
 	}
+	if calls, ok := extractToolCalls(text, tools, choice); ok {
+		return calls, true
+	}
 	// Fallback: try the old JSON format
 	if i := strings.Index(text, "```"); i >= 0 {
 		text = strings.TrimSpace(strings.TrimPrefix(strings.TrimSuffix(text[i+3:], "```"), "json"))
@@ -89,6 +97,14 @@ func parseModelToolDecision(text string, tools []map[string]any, choice any) ([]
 	var probe map[string]json.RawMessage
 	if json.Unmarshal([]byte(text[start:end+1]), &probe) != nil {
 		return nil, false
+	}
+	if _, ok := probe["calls"]; !ok {
+		var object map[string]any
+		if json.Unmarshal([]byte(text[start:end+1]), &object) == nil {
+			if call, ok := coerceToolCallEnvelope(object, tools, allowedToolNames(tools), choice, 0); ok {
+				return []detectedToolCall{call}, true
+			}
+		}
 	}
 	if _, ok := probe["calls"]; !ok {
 		return nil, false

@@ -10,6 +10,7 @@ import (
 var (
 	systemReminderBlockPattern = regexp.MustCompile(`(?is)<system-reminder\b[^>]*>.*?</system-reminder\s*>`)
 	envContextBlockPattern     = regexp.MustCompile(`(?is)<environment_context\b[^>]*>.*?</environment_context\s*>`)
+	editorContextBlockPattern  = regexp.MustCompile(`(?is)<(workspace_info|environment_info|editorContext)\b[^>]*>.*?</(?:workspace_info|environment_info|editorContext)\s*>`)
 	billingHeaderPattern       = regexp.MustCompile(`(?i)x-anthropic-billing-header:[^;\n]*;?\s*`)
 	ccKeyValPattern            = regexp.MustCompile(`(?i)\bcc_[a-z0-9_]+=[^;\n]*;?\s*`)
 )
@@ -66,6 +67,10 @@ func extractHarnessContextFromUser(txt string) (cleanUser string, extractedSyste
 		extractedSystem = append(extractedSystem, strings.TrimSpace(m))
 	}
 	trimmed = envContextBlockPattern.ReplaceAllString(trimmed, "")
+	for _, block := range editorContextBlockPattern.FindAllString(trimmed, -1) {
+		extractedSystem = append(extractedSystem, strings.TrimSpace(block))
+	}
+	trimmed = editorContextBlockPattern.ReplaceAllString(trimmed, "")
 	return strings.TrimSpace(trimmed), extractedSystem
 }
 
@@ -127,6 +132,29 @@ func incrementalSliceStart(messages []oaiMsg, historyLen int) int {
 		}
 	}
 	return historyLen
+}
+
+func incrementalPromptMessages(messages []oaiMsg, historyLen int) []oaiMsg {
+	start := incrementalSliceStart(messages, historyLen)
+	if start <= 0 || start >= len(messages) {
+		return messages
+	}
+	var context []oaiMsg
+	for _, message := range messages[:start] {
+		role := strings.ToLower(strings.TrimSpace(message.Role))
+		if role == "system" || role == "developer" {
+			context = append(context, message)
+			continue
+		}
+		if role == "user" || role == "" {
+			text, _ := parseContent(message.Content)
+			_, extracted := extractHarnessContextFromUser(text)
+			for _, block := range extracted {
+				context = append(context, oaiMsg{Role: "system", Content: block})
+			}
+		}
+	}
+	return append(context, messages[start:]...)
 }
 
 func hasActionableTurn(flattened string) bool {

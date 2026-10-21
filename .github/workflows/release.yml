@@ -19,8 +19,35 @@ env:
   BINARY_NAME: m365-copilot2api
 
 jobs:
+  frontend:
+    name: Build console
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: webapp/package-lock.json
+
+      - name: Build console
+        working-directory: webapp
+        run: |
+          npm ci
+          npm run build
+
+      - name: Upload console
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-console
+          path: internal/web/web/webapp/
+          if-no-files-found: error
+
   package:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: frontend
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -86,6 +113,12 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+
+      - name: Download console
+        uses: actions/download-artifact@v4
+        with:
+          name: web-console
+          path: internal/web/web/webapp/
 
       - name: Build
         env:

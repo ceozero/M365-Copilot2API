@@ -72,13 +72,21 @@ func toolProtocolPrompt(text string, tools []Tool, choice any, hasPlugins bool) 
 		if json.Unmarshal(t.Function, &f) != nil || f.Name == "" {
 			continue
 		}
-		defs = append(defs, deriveToolTemplate(f.Name, f.Description, f.Parameters))
+		definition := deriveToolTemplate(f.Name, f.Description, f.Parameters)
+		if len(f.Parameters) > 0 {
+			definition += "\nParameter JSON schema: " + string(f.Parameters)
+		}
+		defs = append(defs, definition)
 	}
 	if len(defs) == 0 {
 		return text
 	}
+	selection, _ := json.Marshal(choice)
 	return fmt.Sprintf(`Formatting specification for this conversation:
+The tools below are external caller tools. They run in the client application, not in your cloud runtime. Request a tool by emitting a fenced tool_call JSON block such as {"name":"exact_tool_name","arguments":{}}. The gateway forwards that request to the client for execution; you do not need direct runtime access to the tool. Do not deny tool availability merely because it is not a built-in tool.
+The caller's tool_choice is %s. For "required", emit at least one tool call. For a named tool choice, emit that exact tool. For "auto", call a tool when the request needs it; otherwise answer normally. Arguments must match the parameter JSON schema, including types and required fields.
 1. Avoid invoking the built-in Python / code interpreter / sandbox environment.
+Use the caller-provided conversation history, workspace paths, environment context and completed tool results to resolve references such as "this project" or "the current workspace". For questions about the project's implementation, inspect it with the declared read/search/list tools (or a declared command tool when appropriate) before answering. Do not ask for a project name, path or code that is already provided. If no workspace path is provided, use a declared discovery tool only when its schema permits it; otherwise ask for the missing context. Never claim to have read files without successful tool results, and never substitute your cloud filesystem for the caller's workspace.
 2. Whenever the request asks to create, build, make, or modify a file, webpage, game, or script, or to inspect files / run a command, place the output inside a fenced block whose info-string is the exact tool name from <tools> below (or a tool_call JSON block), rather than a plain html/js/typescript code block.
 3. The fenced block must carry the complete file body or the complete command — a block that only describes the code, or a statement that returns a placeholder string, performs nothing.
 4. When the tool has a single free-text parameter and no path parameter (a code/exec/bash style executor), put the full body into that parameter as real code that writes the file, for example cat > "index.html" <<'EOF' ... EOF. Do not emit only a return statement or a code fragment.
@@ -88,5 +96,5 @@ func toolProtocolPrompt(text string, tools []Tool, choice any, hasPlugins bool) 
 %s
 </tools>
 
-%s`, strings.Join(defs, "\n\n"), text)
+%s`, selection, strings.Join(defs, "\n\n"), text)
 }

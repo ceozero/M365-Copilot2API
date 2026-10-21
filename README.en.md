@@ -158,12 +158,12 @@ Open the console in your browser (default `http://127.0.0.1:4141`):
 
 1. Log in with the admin password (changing the password is **mandatory on first login**; default password is `admin123`).
 2. On the "Accounts" page, click **Start Authorization**:
-   - A new browser window will pop up and redirect to the Microsoft sign-in page.
+  - A local console first tries to open an incognito/private window in Chrome, Edge, Brave, or Firefox. If that cannot be started, it automatically falls back to a normal authorization window.
    - Complete the sign-in with your M365 account.
-   - After signing in, the popup window will show a blank page or an error page — **this is expected**, because the callback endpoint isn't a real website and the authorization **is not yet complete**.
-   - Copy the full URL (including the `code=...&state=...` parameters) from the popup window's **address bar**.
+  - After signing in, the authorization window will show a blank page or an error page — **this is expected**, because the callback endpoint isn't a real website and the authorization **is not yet complete**.
+  - Copy the full URL (including the `code=...&state=...` parameters) from the authorization window's **address bar**.
    - Back in the console, paste the URL into the "Callback URL" field and click "Confirm and add".
-   - If your browser blocked the popup, allow popups for this site and try again.
+  - If your browser blocked the normal fallback window, allow popups for this site and try again.
 3. Once authorized, **create your first API key** on the "API Key" page.
 4. Verify the setup with the API examples below.
 

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,6 +15,116 @@ import (
 	"m365-copilot2api/internal/auth"
 	"m365-copilot2api/internal/chathub"
 )
+
+func TestAccountRateLimitProbeDisablePolicy(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		probeErr        error
+		disableLimited  bool
+		initialDisabled bool
+		wantLimited     bool
+		wantDisabled    bool
+	}{
+		{name: "confirmed quota", probeErr: &UpstreamHTTPError{Status: 429}, disableLimited: true, wantLimited: true, wantDisabled: true},
+		{name: "check only overrides global policy", probeErr: &UpstreamHTTPError{Status: 429}, wantLimited: true},
+		{name: "handshake is not quota", probeErr: &chathub.DialError{Kind: "WS_HANDSHAKE"}, disableLimited: true},
+		{name: "authentication is not quota", probeErr: &UpstreamHTTPError{Status: 401}, disableLimited: true},
+		{name: "ambiguous text is not quota", probeErr: &UpstreamHTTPError{Status: 502, Body: "limited connectivity"}, disableLimited: true},
+		{name: "canceled", probeErr: context.Canceled, disableLimited: true},
+		{name: "structured throttle", probeErr: &UpstreamHTTPError{Status: 403, ErrorCode: "ErrorUserThrottled"}, disableLimited: true, wantLimited: true, wantDisabled: true},
+		{name: "quota exhausted", probeErr: &UpstreamHTTPError{ErrorCode: "InsufficientTokens"}, disableLimited: true, wantLimited: true, wantDisabled: true},
+		{name: "healthy account remains manually disabled", initialDisabled: true, wantDisabled: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, err := auth.OpenStore(filepath.Join(t.TempDir(), "accounts.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			account, err := store.Upsert(auth.TokenSet{HomeOID: "probe-account", AccessToken: "token", ExpiresAt: time.Now().Add(time.Hour)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.initialDisabled {
+				if err := store.SetScheduleEnabled(account.ID, false); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg := defaultRuntimeSettings()
+			cfg.AutoDisableCooldownAccounts = true
+			server := &Server{tokens: store, settings: &settingsStore{v: cfg}, accountPool: newAccountHealth()}
+			server.accountPool.onCooldown = server.handleAccountCooldown
+			limited, err := server.applyAccountRateLimitProbe(account.ID, test.probeErr, test.disableLimited)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if limited != test.wantLimited || !store.ScheduleEnabled(account.ID) != test.wantDisabled {
+				t.Fatalf("limited=%v disabled=%v, want limited=%v disabled=%v", limited, !store.ScheduleEnabled(account.ID), test.wantLimited, test.wantDisabled)
+			}
+		})
+	}
+}
+
+func TestAutoDisableCooldownAccounts(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "accounts.json")
+	store, err := auth.OpenStore(storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account, err := store.Upsert(auth.TokenSet{HomeOID: "cooling-account", AccessToken: "token", ExpiresAt: time.Now().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := &settingsStore{path: filepath.Join(t.TempDir(), "settings.json"), v: defaultRuntimeSettings()}
+	server := &Server{tokens: store, settings: settings, accountPool: newAccountHealth()}
+	server.accountPool.onCooldown = server.handleAccountCooldown
+	server.accountPool.MarkFailure(account.ID, &chathub.DialError{Kind: "WS_HANDSHAKE"}, time.Second)
+	if !store.ScheduleEnabled(account.ID) {
+		t.Fatal("default policy must not disable cooling accounts")
+	}
+	request := httptest.NewRequest(http.MethodPut, "/api/admin/settings", strings.NewReader(`{"autoDisableCooldownAccounts":true}`))
+	response := httptest.NewRecorder()
+	server.adminSettings(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("enable policy: %d %s", response.Code, response.Body.String())
+	}
+	if store.ScheduleEnabled(account.ID) {
+		t.Fatal("enabling policy must disable existing cooling accounts")
+	}
+	reopened, err := auth.OpenStore(storePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.ScheduleEnabled(account.ID) {
+		t.Fatal("disabled scheduling must persist")
+	}
+	server.accountPool.MarkSuccess(account.ID)
+	if store.ScheduleEnabled(account.ID) {
+		t.Fatal("cooldown recovery must not undo persistent disable")
+	}
+	if err := store.SetScheduleEnabled(account.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	server.accountPool.MarkFailure(account.ID, &chathub.DialError{Kind: "WS_HANDSHAKE"}, time.Second)
+	if store.ScheduleEnabled(account.ID) {
+		t.Fatal("new transport cooldown must trigger automatic disable")
+	}
+	request = httptest.NewRequest(http.MethodPut, "/api/admin/settings", strings.NewReader(`{"autoDisableCooldownAccounts":false}`))
+	response = httptest.NewRecorder()
+	server.adminSettings(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("disable policy: %d %s", response.Code, response.Body.String())
+	}
+	if store.ScheduleEnabled(account.ID) {
+		t.Fatal("turning off policy must not re-enable accounts")
+	}
+	if err := store.SetScheduleEnabled(account.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	server.accountPool.MarkFailure(account.ID, &chathub.DialError{Kind: "WS_HANDSHAKE"}, time.Second)
+	if !store.ScheduleEnabled(account.ID) {
+		t.Fatal("disabled policy must preserve scheduling on future cooldowns")
+	}
+}
 
 func TestUpstreamErrorClassification(t *testing.T) {
 	cases := []struct {

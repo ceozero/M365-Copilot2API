@@ -167,6 +167,21 @@ func validateDetectedToolCalls(calls []detectedToolCall, tools []map[string]any,
 	return valid, rejected
 }
 
+func toolChoiceRequiresCall(choice any) bool {
+	if mode, ok := choice.(string); ok {
+		return mode == "required"
+	}
+	if selection, ok := choice.(map[string]any); ok {
+		if function, ok := selection["function"].(map[string]any); ok {
+			name, _ := function["name"].(string)
+			return name != ""
+		}
+		name, _ := selection["name"].(string)
+		return name != ""
+	}
+	return false
+}
+
 func toolChoiceAllows(choice any, name string) bool {
 	if choice == nil {
 		return true
@@ -250,6 +265,7 @@ func validateToolResult(messages []oaiMsg, known map[string]bool) error {
 var toolRefusalPatterns = []string{
 	"tools are not available",
 	"tool is not available",
+	"no access to the tool",
 	"not actually registered",
 	"not actually available",
 	"not available in this session",
@@ -261,7 +277,10 @@ func isToolRefusal(text string) bool {
 	if len(text) >= 200 {
 		return false
 	}
-	low := strings.ToLower(text)
+	low := strings.ReplaceAll(strings.ToLower(text), "\u2019", "'")
+	if strings.Contains(low, "tool") && (strings.Contains(low, "don't have access") || strings.Contains(low, "do not have access")) {
+		return true
+	}
 	for _, p := range toolRefusalPatterns {
 		if strings.Contains(low, strings.ToLower(p)) {
 			return true

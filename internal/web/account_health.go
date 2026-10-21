@@ -475,6 +475,7 @@ func ResetGlobalCircuit() {
 
 type accountHealth struct {
 	mu                     sync.Mutex
+	onCooldown             func(string)
 	cooldown               map[string]time.Time
 	authFail               map[string]bool
 	limited                map[string]bool
@@ -588,6 +589,11 @@ func (h *accountHealth) MarkImageLimited(accountID string) {
 	if h == nil || accountID == "" {
 		return
 	}
+	defer func() {
+		if h.onCooldown != nil {
+			h.onCooldown(accountID)
+		}
+	}()
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.imageLimited[accountID] = true
@@ -687,6 +693,15 @@ func (h *accountHealth) AuthFailReason(accountID string) string {
 }
 
 func (h *accountHealth) MarkFailure(accountID string, err error, window time.Duration) {
+	h.recordFailure(accountID, err, window, true)
+}
+
+func (h *accountHealth) recordFailure(accountID string, err error, window time.Duration, notify bool) {
+	defer func() {
+		if notify && h.onCooldown != nil {
+			h.onCooldown(accountID)
+		}
+	}()
 	if window <= 0 {
 		window = 60 * time.Second
 	}

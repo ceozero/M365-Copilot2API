@@ -49,10 +49,33 @@ func TestBuildAnswerRequestAddsCompletedEvidence(t *testing.T) {
 
 func TestBuildAnswerRequestMCPForwardsTools(t *testing.T) {
 	req := buildAnswerRequest("[user]\nhello", "magic", answerRequestTestBody(), agentLedger{}, "router", "http://127.0.0.1:4142/v1/mcp/sse", runtimeSettings{}, chathub.FeatureFlags{}, chathubLocale{}, false)
+	if !req.DisableCodeInterpreter {
+		t.Fatal("MCP answer re-enabled the built-in code interpreter")
+	}
 	if len(req.Tools) != 1 || req.ToolChoice != "auto" {
 		t.Fatalf("MCP answer lost tools: tools=%d choice=%#v", len(req.Tools), req.ToolChoice)
 	}
 	if req.MCPServerURL != "http://127.0.0.1:4142/v1/mcp/sse" {
 		t.Fatalf("MCP URL not set: %q", req.MCPServerURL)
+	}
+}
+
+func TestBuildAnswerRequestDisablesCodeInterpreterForTools(t *testing.T) {
+	for _, mode := range []string{"router", "native"} {
+		for _, choice := range []string{"auto", "required", "none"} {
+			t.Run(mode+"/"+choice, func(t *testing.T) {
+				body := answerRequestTestBody()
+				body.ToolChoice = choice
+				ledger := agentLedger{Completed: []toolEvidence{{ID: "call_1", Name: "read_file", Arguments: `{}`, Result: "ok"}}}
+				req := buildAnswerRequest("[user]\nsummarize", "magic", body, ledger, mode, "", runtimeSettings{}, chathub.FeatureFlags{}, chathubLocale{}, false)
+				if !req.DisableCodeInterpreter {
+					t.Fatal("tool answer re-enabled the built-in code interpreter")
+				}
+			})
+		}
+	}
+	req := buildAnswerRequest("hello", "magic", oaiReq{}, agentLedger{}, "router", "", runtimeSettings{}, chathub.FeatureFlags{}, chathubLocale{}, false)
+	if req.DisableCodeInterpreter {
+		t.Fatal("ordinary chat unexpectedly disabled the code interpreter")
 	}
 }

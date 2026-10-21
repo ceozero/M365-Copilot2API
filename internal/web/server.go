@@ -84,6 +84,20 @@ func (s *Server) logThrottlingWarning(accountID string, throttling any) {
 	}
 }
 
+func (s *Server) disableCoolingAccount(accountID string) error {
+	if s.settings == nil || s.tokens == nil || s.accountPool == nil || !s.settings.get().AutoDisableCooldownAccounts {
+		return nil
+	}
+	if _, cooling := s.accountPool.CooldownUntil(accountID); !cooling || !s.tokens.ScheduleEnabled(accountID) {
+		return nil
+	}
+	if err := s.tokens.SetScheduleEnabled(accountID, false); err != nil {
+		return err
+	}
+	log.Printf("[account-policy] disabled cooling account=%s", accountID)
+	return nil
+}
+
 func (s *Server) markAccountResult(accountID string, err error) {
 	if s == nil || s.accountPool == nil || accountID == "" {
 		return
@@ -93,6 +107,12 @@ func (s *Server) markAccountResult(accountID string, err error) {
 		return
 	}
 	s.accountPool.MarkSuccess(accountID)
+}
+
+func (s *Server) handleAccountCooldown(accountID string) {
+	if err := s.disableCoolingAccount(accountID); err != nil {
+		log.Printf("[account-policy] disable cooling account=%s: %v", accountID, err)
+	}
 }
 
 // confirmRateLimitNotice verifies a text-channel rate-limit notice with a
@@ -234,7 +254,7 @@ func New() (*Server, error) {
 			sessionTTL = d
 		}
 	}
-	return &Server{
+	server := &Server{
 		tokens:             store,
 		accountPool:        newAccountHealth(),
 		accountConcurrency: newAccountConcurrency(),
@@ -261,7 +281,9 @@ func New() (*Server, error) {
 		generatedImages:      map[string]generatedImage{},
 		convCache:            newConversationCache(),
 		contextAffinity:      newContextAffinity(),
-	}, nil
+	}
+	server.accountPool.onCooldown = server.handleAccountCooldown
+	return server, nil
 }
 
 func (s *Server) StartConvCacheGC() {
@@ -527,11 +549,13 @@ func (s *Server) Routes() http.Handler {
 	m.HandleFunc("/api/accounts/schedule", s.scheduleAccount)
 	m.HandleFunc("/api/accounts/batch", s.batchAccounts)
 	m.HandleFunc("/api/accounts/token-health", s.tokenHealth)
+	m.HandleFunc("/api/accounts/check-rate-limit", s.checkAccountRateLimit)
 	m.HandleFunc("/api/accounts/clear-cooldown", s.clearCooldown)
 	m.HandleFunc("/api/accounts/delete", s.deleteAccount)
 	m.HandleFunc("/api/accounts/provision", s.provisionAccount)
 	m.HandleFunc("/api/accounts/bind-proxy", s.bindProxy)
 	m.HandleFunc("/api/auth/start", s.startPKCE)
+	m.HandleFunc("/api/auth/launch", s.launchPKCE)
 	m.HandleFunc("/api/auth/status", s.pkceStatus)
 	m.HandleFunc("/api/auth/callback", s.callbackPKCE)
 	m.HandleFunc("/api/chat", s.chatOnce)
@@ -895,7 +919,8 @@ func (s *Server) accounts(w http.ResponseWriter, r *http.Request) {
 			ExpiresAt: a.ExpiresAt, UpdatedAt: a.UpdatedAt, BoundProxy: a.BoundProxy,
 		})
 	}
-	jsonOut(w, map[string]any{"accounts": out, "health": s.accountPool.Snapshot()})
+	autoDisableCooldown := s.settings != nil && s.settings.get().AutoDisableCooldownAccounts
+	jsonOut(w, map[string]any{"accounts": out, "health": s.accountPool.Snapshot(), "autoDisableCooldownAccounts": autoDisableCooldown})
 }
 
 func (s *Server) refreshAccount(w http.ResponseWriter, r *http.Request) {
@@ -966,6 +991,108 @@ func (s *Server) batchAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOut(w, map[string]any{"status": "updated", "updated": n})
+}
+
+func confirmedAccountRateLimit(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, chathub.ErrRateLimitNotice) {
+		return true
+	}
+	var httpErr *UpstreamHTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.Status == http.StatusTooManyRequests || httpErr.ErrorCode == "ErrorUserThrottled" || httpErr.ErrorCode == "InsufficientTokens"
+	}
+	var dialErr *chathub.DialError
+	return errors.As(err, &dialErr) && (dialErr.Status == http.StatusTooManyRequests || dialErr.Kind == "QUOTA_429")
+}
+
+func (s *Server) applyAccountRateLimitProbe(accountID string, probeErr error, disableLimited bool) (bool, error) {
+	limited := confirmedAccountRateLimit(probeErr)
+	if probeErr != nil {
+		s.accountPool.recordFailure(accountID, probeErr, s.getRateLimitCooldown(), false)
+	} else {
+		s.accountPool.MarkSuccess(accountID)
+	}
+	if limited && disableLimited {
+		if err := s.tokens.SetScheduleEnabled(accountID, false); err != nil {
+			return limited, err
+		}
+	}
+	return limited, nil
+}
+
+func (s *Server) checkAccountRateLimit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
+		return
+	}
+	var body struct {
+		ID             string `json:"id"`
+		Model          string `json:"model"`
+		DisableLimited bool   `json:"disableLimited"`
+	}
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&body) != nil || strings.TrimSpace(body.ID) == "" || !isKnownPublicModel(body.Model) || isImageModel(body.Model) {
+		writeOpenAIError(w, 400, "invalid_request_error", "valid account id and chat model required")
+		return
+	}
+	account, exists := s.tokens.Get(strings.TrimSpace(body.ID))
+	if !exists {
+		writeOpenAIError(w, 404, "not_found", "account not found")
+		return
+	}
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+	probe := func() error {
+		fresh, err := s.tokens.EnsureValid(account.ID)
+		if err != nil {
+			return err
+		}
+		if fresh.OID == "" || fresh.TID == "" {
+			fresh.OID, fresh.TID = extractOIDTID(fresh.AccessToken)
+		}
+		release, err := s.accountConcurrency.Acquire(ctx, account.ID)
+		if err != nil {
+			return err
+		}
+		defer release()
+		cfg := s.settings.get()
+		tone, err := reasoningTone(body.Model, "")
+		if err != nil {
+			return err
+		}
+		scenario, license := effectiveScenarioAndLicense(body.Model, tone, cfg.Scenario, cfg.LicenseType)
+		s.accountPool.MarkCall(account.ID)
+		result, err := s.accountClient(account.ID).Chat(ctx, chathub.Account{AccessToken: fresh.AccessToken, OID: fresh.OID, TID: fresh.TID}, chathub.Request{
+			Text: rateLimitProbePrompt, Tone: tone, Started: true, LicenseType: license, Scenario: scenario, FeatureFlags: s.featureFlags(), DisableCodeInterpreter: true,
+		})
+		if result.ConversationID != "" {
+			s.dropTransientConversation(result.ConversationID)
+		}
+		return err
+	}
+	err := probe()
+	if errors.Is(err, chathub.ErrRateLimitNotice) {
+		err = probe()
+	}
+	category := ClassifyError(err)
+	limited, updateErr := s.applyAccountRateLimitProbe(account.ID, err, body.DisableLimited)
+	if updateErr != nil {
+		writeOpenAIError(w, 500, "account_update_error", updateErr.Error())
+		return
+	}
+	status := "healthy"
+	message := ""
+	if err != nil {
+		status = "error"
+		message = upstreamError(err)
+		if limited {
+			status = "limited"
+		}
+	}
+	jsonOut(w, map[string]any{"id": account.ID, "model": body.Model, "status": status, "rateLimited": limited, "disabled": !s.tokens.ScheduleEnabled(account.ID), "category": category, "message": message, "latencyMs": time.Since(started).Milliseconds()})
 }
 
 func (s *Server) tokenHealth(w http.ResponseWriter, r *http.Request) {
@@ -1136,6 +1263,42 @@ func (s *Server) startPKCE(w http.ResponseWriter, _ *http.Request) {
 		"redirectUri": redirectURI,
 		"note":        "If redirect is nativeclient, paste the final URL/code into /api/auth/callback after login.",
 	})
+}
+
+func (s *Server) launchPKCE(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeOpenAIError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
+		return
+	}
+	state := r.URL.Query().Get("state")
+	if state == "" {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "missing state")
+		return
+	}
+	s.mu.Lock()
+	p, ok := s.pkce[state]
+	if ok && time.Since(p.Created) > 10*time.Minute {
+		delete(s.pkce, state)
+		ok = false
+	}
+	s.mu.Unlock()
+	if !ok {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "unknown or expired state")
+		return
+	}
+
+	if err := launchPrivateBrowser(auth.AuthorizationURL(
+		auth.AuthorizeEndpoint(),
+		auth.ClientID(),
+		p.RedirectURI,
+		state,
+		auth.Challenge(p.Verifier),
+		auth.Scope(),
+	)); err != nil {
+		writeOpenAIError(w, http.StatusInternalServerError, "browser_launch_failed", err.Error())
+		return
+	}
+	jsonOut(w, map[string]any{"ok": true})
 }
 
 func (s *Server) pkceStatus(w http.ResponseWriter, r *http.Request) {
@@ -2352,8 +2515,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 			body.AccountID = firstNonEmpty(body.AccountID, resolved.AccountID)
 			log.Printf("[session-resolver] matched=%s conversation=%s history=%d total=%d", resolved.MatchedBy, resolved.ConversationID, resolved.HistoryLen, len(body.Messages))
 			if resolved.HistoryLen > 0 && resolved.HistoryLen < len(body.Messages) {
-				sliceStart := incrementalSliceStart(body.Messages, resolved.HistoryLen)
-				incPrompt, incAtt := flattenPromptMessages(body.Messages[sliceStart:], nil)
+				incPrompt, incAtt := flattenPromptMessages(incrementalPromptMessages(body.Messages, resolved.HistoryLen), nil)
 				incPrompt = strings.TrimSpace(incPrompt)
 				if incPrompt != "" && hasActionableTurn(incPrompt) {
 					answerPrompt = incPrompt
@@ -2430,8 +2592,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 		sysHash := systemPromptHash(body.Messages)
 		if cached := s.convCache.Lookup(acc.ID, convCacheModel); cached != nil && cached.SystemPrompt == sysHash {
 			if len(body.Messages) > cached.MessageCount {
-				sliceStart := incrementalSliceStart(body.Messages, cached.MessageCount)
-				incPrompt, incAtt := flattenPromptMessages(body.Messages[sliceStart:], nil)
+				incPrompt, incAtt := flattenPromptMessages(incrementalPromptMessages(body.Messages, cached.MessageCount), nil)
 				incPrompt = strings.TrimSpace(incPrompt)
 				if incPrompt != "" && hasActionableTurn(incPrompt) {
 					body.ConversationID = cached.ConversationID
@@ -2590,11 +2751,14 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 				return nil
 			}
 			text.WriteString(ev.Text)
+			if len(toolMaps) > 0 && toolChoiceRequiresCall(body.ToolChoice) {
+				return nil
+			}
 			// Hold back only a fence that is a real tool call; an ordinary code
 			// block or prose is released immediately and in order so the user
 			// sees step-by-step streaming output.
 			hold := func(fence string) bool {
-				return len(fencedToolCalls(fence, toolMaps, body.ToolChoice)) > 0
+				return isToolProtocolText(fence, toolMaps, body.ToolChoice)
 			}
 			emitted, held := fenceStream(pending.String(), ev.Text, 3, hold)
 			if err := emitText(emitted); err != nil {
@@ -2634,8 +2798,11 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 						return nil
 					}
 					text.WriteString(ev.Text)
+					if len(toolMaps) > 0 && toolChoiceRequiresCall(body.ToolChoice) {
+						return nil
+					}
 					hold := func(fence string) bool {
-						return len(fencedToolCalls(fence, toolMaps, body.ToolChoice)) > 0
+						return isToolProtocolText(fence, toolMaps, body.ToolChoice)
 					}
 					emitted, held := fenceStream(pending.String(), ev.Text, 3, hold)
 					if err := emitText(emitted); err != nil {
@@ -2696,8 +2863,11 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 						return nil
 					}
 					text.WriteString(ev.Text)
+					if len(toolMaps) > 0 && toolChoiceRequiresCall(body.ToolChoice) {
+						return nil
+					}
 					hold := func(fence string) bool {
-						return len(fencedToolCalls(fence, toolMaps, body.ToolChoice)) > 0
+						return isToolProtocolText(fence, toolMaps, body.ToolChoice)
 					}
 					emitted, held := fenceStream(pending.String(), ev.Text, 3, hold)
 					if err := emitText(emitted); err != nil {
@@ -2790,13 +2960,14 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 		}
 		calls, rejected := validateCalls("stream", rawCalls)
 		toolResult := chathub.Result{Text: fullCandidateText}
-		if len(calls) == 0 && rejected > 0 {
+		if len(calls) == 0 && len(toolMaps) > 0 && fmt.Sprint(body.ToolChoice) != "none" &&
+			(rejected > 0 || toolChoiceRequiresCall(body.ToolChoice) || isToolRefusal(fullCandidateText)) {
 			// A native ChatHub event can contain a fabricated or empty tool name.
 			// Do not leak it to the local runner: ask the model to remap the intent
 			// to exactly one of the tools the client actually declared.
-			repairPrompt := modelToolRouterPrompt(prompt+"\n"+ledger.RouterContext(), toolMaps, "required") +
-				"\nREPAIR RULE: The previous upstream event selected an undeclared tool. Select one declared tool that performs the intended operation. Never return unknown_tool."
-			repairRes, repairErr := s.chatWithAccount(ctx, acc.ID, account, chathub.Request{Text: repairPrompt, Tone: tone, Attachments: body.Attachments, LicenseType: toolCfg.LicenseType, Scenario: toolCfg.Scenario})
+			repairPrompt := modelToolRouterPrompt(prompt+"\n"+activeLedger.RouterContext(), toolMaps, body.ToolChoice) +
+				"\nREPAIR RULE: The previous response did not produce a valid caller tool call. Select a tool from the declared list that satisfies tool_choice. These tools execute on the caller, not in the cloud sandbox. Return a CALL_TOOL: line, not a statement about tool availability."
+			repairRes, repairErr := s.chatWithAccount(ctx, acc.ID, account, chathub.Request{Text: repairPrompt, Tone: tone, Attachments: body.Attachments, LicenseType: toolCfg.LicenseType, Scenario: toolCfg.Scenario, DisableCodeInterpreter: true})
 			if repairErr == nil {
 				repaired, parsed := parseModelToolDecision(repairRes.Text, toolMaps, body.ToolChoice)
 				if parsed {
@@ -2808,7 +2979,11 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 			}
 			if len(calls) == 0 {
 				log.Printf("[tool-validation] id=%s stage=stream-repair failed", requestID)
-				_ = sseRaw(r.Context(), w, flusher, "data: "+mustJSON(map[string]any{"error": map[string]any{"message": "upstream selected an undeclared tool and repair failed", "code": "invalid_tool_call"}})+"\n\n")
+				if !sw.isCommitted() {
+					writeOpenAIError(w, http.StatusBadGateway, "invalid_tool_call", "model did not select a valid tool after constrained retry")
+					return
+				}
+				_ = sseRaw(r.Context(), w, flusher, "data: "+mustJSON(map[string]any{"error": map[string]any{"message": "model did not select a valid tool after constrained retry", "code": "invalid_tool_call"}})+"\n\n")
 				_ = sseRaw(r.Context(), w, flusher, "data: [DONE]\n\n")
 				return
 			}
@@ -3245,7 +3420,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 	if len(toolMaps) > 0 && isToolRefusal(res.Text) {
 		log.Printf("[tool-eject] model refused tools, retrying with correction")
 		correction := "Your previous response incorrectly denied that caller tools are available. They are real, active, and callable on the caller's Windows machine. Call the appropriate tool now. Do not explain tool availability.\n\nUser request:\n" + prompt
-		res2, err2 := s.chatWithAccount(ctx, acc.ID, account, chathub.Request{Text: correction, Tone: tone, Attachments: body.Attachments, LicenseType: toolCfg.LicenseType, Scenario: toolCfg.Scenario})
+		res2, err2 := s.chatWithAccount(ctx, acc.ID, account, chathub.Request{Text: correction, Tone: tone, Attachments: body.Attachments, LicenseType: toolCfg.LicenseType, Scenario: toolCfg.Scenario, DisableCodeInterpreter: true})
 		if err2 == nil && !isToolRefusal(res2.Text) {
 			res = res2
 		}
@@ -3253,7 +3428,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 	if len(toolMaps) > 0 && isSandboxHallucination(res.Text) {
 		log.Printf("[sandbox-eject] model used code interpreter/sandbox, retrying with explicit tool instruction")
 		correction := "CRITICAL: You must NOT use any built-in code interpreter, Python sandbox, or cloud execution environment. The caller has provided a bash tool that runs Windows PowerShell 5.1 on their local machine — use it to execute any commands or code. Do NOT say you cannot run code. Do NOT say you only have a Linux container. Do NOT say you have no Windows execution channel. You DO have a bash tool that runs on Windows. Call the bash tool NOW with the appropriate PowerShell command.\n\nUser request:\n" + prompt
-		res2, err2 := s.chatWithAccount(ctx, acc.ID, account, chathub.Request{Text: correction, Tone: tone, Attachments: body.Attachments, LicenseType: toolCfg.LicenseType, Scenario: toolCfg.Scenario})
+		res2, err2 := s.chatWithAccount(ctx, acc.ID, account, chathub.Request{Text: correction, Tone: tone, Attachments: body.Attachments, LicenseType: toolCfg.LicenseType, Scenario: toolCfg.Scenario, DisableCodeInterpreter: true})
 		if err2 == nil && !isSandboxHallucination(res2.Text) {
 			res = res2
 		}
@@ -3293,7 +3468,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 	// and honor an explicit tool_choice=required that the model answered with
 	// prose instead of a call. A plain text answer with tool_choice=auto is a
 	// legitimate "no tool" decision and never triggers a second model call.
-	if (invalidDetectedTool || fmt.Sprint(body.ToolChoice) == "required") && len(toolMaps) > 0 && fmt.Sprint(body.ToolChoice) != "none" {
+	if (invalidDetectedTool || toolChoiceRequiresCall(body.ToolChoice)) && len(toolMaps) > 0 && fmt.Sprint(body.ToolChoice) != "none" {
 		routePrompt := modelToolRouterPrompt(prompt+"\n"+activeLedger.RouterContext(), toolMaps, body.ToolChoice)
 		routeRes, routeErr := s.chatWithAccount(ctx, acc.ID, account, chathub.Request{Text: routePrompt, Tone: tone, Attachments: body.Attachments, LicenseType: toolCfg.LicenseType, Scenario: toolCfg.Scenario, DisableCodeInterpreter: true})
 		if routeErr == nil {
@@ -3315,7 +3490,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if fmt.Sprint(body.ToolChoice) == "required" {
+		if toolChoiceRequiresCall(body.ToolChoice) {
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_error", "model did not select a required tool after constrained retry")
 			return
 		}
