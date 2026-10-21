@@ -59,6 +59,9 @@ func TestToolProtocolPromptDescribesCallerExecutionAndSchema(t *testing.T) {
 	prompt := toolProtocolPrompt("Weather in Berlin", tools, "required", false)
 	for _, expected := range []string{
 		"external caller tools",
+		"workspace paths",
+		"inspect it with the declared read/search/list tools",
+		"Never claim to have read files without successful tool results",
 		"not in your cloud runtime",
 		"fenced tool_call JSON block",
 		`tool_choice is "required"`,

@@ -12,6 +12,7 @@ func modelToolRouterPrompt(prompt string, tools []map[string]any, choice any) st
 	rules := `- If a tool is needed, respond with: CALL_TOOL: tool_name({"arg1":"value1"})
 - If no tool is needed, respond with: NO_TOOL_NEEDED
 - Only use tools from the available list above
+- Resolve references to the current project from the supplied history, workspace and environment context. For questions about project implementation, use an available read/search/list tool before answering; do not ask for a project name or path already supplied. Do not invent a workspace path or claim access without tool results.
 - Validate all arguments against the tool's schema
 - Do not invent tools that are not in the list
 - When the user asks you to implement, modify, enhance, fix, create, or inspect code/files (e.g. "去增强吧", "去干活", "去改代码", "go implement it"), you MUST emit a CALL_TOOL: line to inspect or modify the target files rather than returning NO_TOOL_NEEDED

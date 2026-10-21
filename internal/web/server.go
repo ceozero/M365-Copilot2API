@@ -2515,8 +2515,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 			body.AccountID = firstNonEmpty(body.AccountID, resolved.AccountID)
 			log.Printf("[session-resolver] matched=%s conversation=%s history=%d total=%d", resolved.MatchedBy, resolved.ConversationID, resolved.HistoryLen, len(body.Messages))
 			if resolved.HistoryLen > 0 && resolved.HistoryLen < len(body.Messages) {
-				sliceStart := incrementalSliceStart(body.Messages, resolved.HistoryLen)
-				incPrompt, incAtt := flattenPromptMessages(body.Messages[sliceStart:], nil)
+				incPrompt, incAtt := flattenPromptMessages(incrementalPromptMessages(body.Messages, resolved.HistoryLen), nil)
 				incPrompt = strings.TrimSpace(incPrompt)
 				if incPrompt != "" && hasActionableTurn(incPrompt) {
 					answerPrompt = incPrompt
@@ -2593,8 +2592,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 		sysHash := systemPromptHash(body.Messages)
 		if cached := s.convCache.Lookup(acc.ID, convCacheModel); cached != nil && cached.SystemPrompt == sysHash {
 			if len(body.Messages) > cached.MessageCount {
-				sliceStart := incrementalSliceStart(body.Messages, cached.MessageCount)
-				incPrompt, incAtt := flattenPromptMessages(body.Messages[sliceStart:], nil)
+				incPrompt, incAtt := flattenPromptMessages(incrementalPromptMessages(body.Messages, cached.MessageCount), nil)
 				incPrompt = strings.TrimSpace(incPrompt)
 				if incPrompt != "" && hasActionableTurn(incPrompt) {
 					body.ConversationID = cached.ConversationID
