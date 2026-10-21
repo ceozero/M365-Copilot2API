@@ -3636,7 +3636,7 @@ func (s *Server) writePublicIdentityChatResponse(w http.ResponseWriter, r *http.
 			Time:         time.Now(),
 			APIKeyPrefix: extractAPIKey(r),
 			Model:        model,
-			Endpoint:     "/v1/chat/completions",
+			Endpoint:     requestEndpoint(r),
 			InputTokens:  inputTokens,
 			OutputTokens: outputTokens,
 			DurationMs:   time.Since(startedAt).Milliseconds(),
@@ -3685,6 +3685,13 @@ func (s *Server) writePublicIdentityChatResponse(w http.ResponseWriter, r *http.
 }
 
 const defaultPublicModelName = "m365-copilot"
+
+func requestEndpoint(r *http.Request) string {
+	if r != nil && r.URL != nil && strings.TrimSpace(r.URL.Path) != "" {
+		return r.URL.Path
+	}
+	return "/v1/chat/completions"
+}
 
 func streamFinalResultFallback(streamedContentLen int, final string) string {
 	if streamedContentLen == 0 && strings.TrimSpace(final) != "" {
@@ -3736,7 +3743,7 @@ func (s *Server) bindConversation(acc auth.AccountToken, body *oaiReq, r *http.R
 		APIKeyPrefix: apiKey,
 		AccountEmail: acc.Email,
 		Model:        firstNonEmpty(body.Model, "m365-copilot"),
-		Endpoint:     "/v1/chat/completions",
+		Endpoint:     requestEndpoint(r),
 		Stream:       body.Stream,
 		InputTokens:  newTokens,
 		OutputTokens: EstimateTokens(res.Text),
