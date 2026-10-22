@@ -108,7 +108,7 @@ export function DashboardPage({ push, nav }: { push: Push; nav: (id: "accounts" 
                   <tr key={i}>
                     <td style={{ color: "var(--muted)", fontSize: 12 }}>{l.time ? new Date(l.time).toLocaleTimeString() : "-"}</td>
                     <td>{l.model ?? "-"}</td>
-                    <td>{String(l.endpoint ?? "-").replace(/^\/v1\//, "")}</td>
+                    <td>{String(l.endpoint ?? "-")}</td>
                     <td>{(l.input_tokens ?? 0) + (l.output_tokens ?? 0)}</td>
                     <td>{l.status ?? "-"}</td>
                   </tr>
