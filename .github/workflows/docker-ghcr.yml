@@ -1,0 +1,162 @@
+name: 构建 M365-Copilot2API Docker 镜像
+
+on:
+  push:
+    branches:
+      - '**'
+    tags:
+      - '**'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '本仓库标签号（例如 v0.7.3，留空则构建所选分支或标签的当前提交）'
+        required: false
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  UPSTREAM_REPO: ${{ github.repository }}
+  IMAGE_REPO: ghcr.io/${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Resolve target tag and git ref
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          TAG="$(printf '%s' "${INPUT_TAG}" | xargs)"
+          GIT_REF="${GITHUB_SHA}"
+          if [ -n "${TAG}" ]; then
+            # 手动指定标签时严格检出该标签，不回退到其他分支。
+            GIT_REF="refs/tags/${TAG}"
+          elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            # 分支推送使用提交标签，确保构建的是本次推送的源码。
+            TAG="sha-${GITHUB_SHA:0:12}"
+          fi
+
+          if [[ ! "${TAG}" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$ ]]; then
+            echo "Invalid Docker image tag: ${TAG}"
+            exit 1
+          fi
+
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "git_ref=${GIT_REF}" >> "${GITHUB_OUTPUT}"
+          echo "Target tag: ${TAG} (version: ${VERSION}, git_ref: ${GIT_REF})"
+
+      - name: Set Docker image name
+        id: image
+        run: |
+          set -euo pipefail
+
+          # GHCR / Docker 规范要求镜像名称全小写
+          IMAGE="$(echo "${IMAGE_REPO}" | tr '[:upper:]' '[:lower:]')"
+          echo "image=${IMAGE}" >> "${GITHUB_OUTPUT}"
+          echo "Docker image: ${IMAGE}"
+
+      - name: Checkout M365-Copilot2API source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ steps.tag.outputs.git_ref }}
+          path: upstream
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: upstream/go.mod
+          cache-dependency-path: upstream/go.sum
+
+      - name: Compile linux/amd64 and linux/arm64 binaries
+        working-directory: upstream
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+
+          COMMIT="$(git rev-parse --short HEAD)"
+          BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          LDFLAGS="-s -w -X m365-copilot2api/internal/web.Version=${VERSION} -X m365-copilot2api/internal/web.Commit=${COMMIT} -X m365-copilot2api/internal/web.BuildTime=${BUILD_TIME}"
+
+          for ARCH in amd64 arm64; do
+            echo "Building linux/${ARCH}..."
+            OUT_DIR="../docker_context/linux/${ARCH}"
+            mkdir -p "${OUT_DIR}"
+            GOOS=linux GOARCH="${ARCH}" go build \
+              -trimpath \
+              -ldflags="${LDFLAGS}" \
+              -o "${OUT_DIR}/m365-copilot2api" \
+              ./cmd/server
+          done
+
+      - name: Prepare Docker build context
+        run: |
+          set -euo pipefail
+
+          cat > docker_context/Dockerfile <<'EOF'
+          FROM alpine:3.20
+          ARG TARGETOS
+          ARG TARGETARCH
+          RUN apk add --no-cache ca-certificates tzdata \
+              && addgroup -S m365 && adduser -S -G m365 m365 \
+              && mkdir -p /data /app
+          WORKDIR /app
+          COPY ${TARGETOS}/${TARGETARCH}/m365-copilot2api /app/m365-copilot2api
+          RUN chmod +x /app/m365-copilot2api && chown -R m365:m365 /app /data
+          USER m365
+          EXPOSE 4141
+          ENV M365_LISTEN=0.0.0.0:4141 \
+              M365_DATA_DIR=/data \
+              M365_CONFIG=/data/accounts.json \
+              M365_TOKEN_CACHE=/data/token-cache.json \
+              M365_SESSION_CACHE=/data/sessions.json \
+              M365_API_KEYS=/data/api-keys.json \
+              M365_ADMIN_PASSWORD_FILE=/data/admin-password \
+              M365_ADMIN_PASSWORD_BOOTSTRAP_FILE=/run/secrets/m365_admin_password \
+              M365_FORCE_IPV4=
+          VOLUME ["/data"]
+          ENTRYPOINT ["/app/m365-copilot2api"]
+          EOF
+
+          find docker_context -maxdepth 3 -print
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_PUBLISH_TOKEN || github.token }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./docker_context
+          file: ./docker_context/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.image.outputs.image }}:latest
+            ${{ steps.image.outputs.image }}:${{ steps.tag.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.tag.outputs.tag }}
+            org.opencontainers.image.description=M365-Copilot2API Docker image built from this repository
