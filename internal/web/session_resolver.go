@@ -446,10 +446,33 @@ func contextPrefixLen(hist, msgs []oaiMsg) int {
 			break
 		}
 	}
+	if !boundary && hasPendingToolCallPrefix(hist, msgs) {
+		boundary = true
+	}
 	if !boundary {
 		return 0
 	}
 	return len(hist)
+}
+
+func hasPendingToolCallPrefix(hist, msgs []oaiMsg) bool {
+	if len(hist) == 0 || len(hist) >= len(msgs) {
+		return false
+	}
+	last := hist[len(hist)-1]
+	if !strings.EqualFold(strings.TrimSpace(last.Role), "assistant") || len(last.ToolCalls) == 0 {
+		return false
+	}
+	next := msgs[len(hist)]
+	if !strings.EqualFold(strings.TrimSpace(next.Role), "tool") || strings.TrimSpace(next.ToolCallID) == "" {
+		return false
+	}
+	for _, call := range last.ToolCalls {
+		if id, _ := call["id"].(string); id == next.ToolCallID {
+			return true
+		}
+	}
+	return false
 }
 
 // messagesEqual 鍒ゅ畾涓ゆ潯娑堟伅鍦ㄤ細璇濋敭鎰忎箟涓婄瓑浠凤細role 涓庢枃鏈唴瀹逛竴鑷淬€?
@@ -490,7 +513,7 @@ func toolCallEqual(x, y map[string]any) bool {
 	}
 	xa, _ := xFunc["arguments"].(string)
 	ya, _ := yFunc["arguments"].(string)
-	return xa == ya
+	return canonicalToolArguments(xa) == canonicalToolArguments(ya)
 }
 
 func (sr *sessionResolver) Bind(sessionID, conversationID, accountID string, body *oaiReq, assistantText string, r *http.Request) {

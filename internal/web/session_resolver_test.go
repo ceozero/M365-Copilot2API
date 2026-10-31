@@ -1,6 +1,7 @@
 package web
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -42,6 +43,48 @@ func TestResolveContentKeyedSameIdentity(t *testing.T) {
 	}
 	if res.HistoryLen != 2 {
 		t.Fatalf("expected HistoryLen=2 (增量起点), got %d", res.HistoryLen)
+	}
+}
+
+func TestResolveToolCallContinuationReusesBoundConversation(t *testing.T) {
+	t.Setenv("M365_SESSION_CACHE", filepath.Join(t.TempDir(), "sessions.json"))
+	sr := openSessionResolver()
+	req := resolverTestRequest("203.0.113.10", "client-a", "alice")
+	initial := &oaiReq{Messages: []oaiMsg{{Role: "user", Content: "检查当前目录"}}}
+	calls := []detectedToolCall{{
+		ID:        "call_exec_1",
+		Type:      "function",
+		Name:      "exec",
+		Arguments: json.RawMessage(`{"input":"Get-Location"}`),
+	}}
+	toolTurn := toolCallHistory(initial, calls).Messages
+	if len(toolTurn) != 2 || len(toolTurn[1].ToolCalls) != 1 {
+		t.Fatalf("tool call was not added to the bound history: %+v", toolTurn)
+	}
+	sr.Bind("session-1", "conv-tools", "account-1", &oaiReq{Messages: toolTurn}, "", req)
+
+	continuation := append(cloneMessages(toolTurn), oaiMsg{
+		Role:       "tool",
+		ToolCallID: "call_exec_1",
+		Content:    "Path\n----\nE:\\project",
+	})
+	resolved := sr.Resolve(req, &oaiReq{Messages: continuation})
+	if resolved.IsNew || resolved.ConversationID != "conv-tools" {
+		t.Fatalf("tool continuation did not reuse its M365 conversation: %+v", resolved)
+	}
+	if resolved.HistoryLen != len(toolTurn) {
+		t.Fatalf("HistoryLen=%d, want %d", resolved.HistoryLen, len(toolTurn))
+	}
+
+	continuation[1].ToolCalls[0]["function"].(map[string]any)["arguments"] = `{ "input" : "Get-Location" }`
+	if changedWhitespace := sr.Resolve(req, &oaiReq{Messages: continuation}); changedWhitespace.IsNew {
+		t.Fatalf("equivalent JSON arguments did not match the bound tool call: %+v", changedWhitespace)
+	}
+
+	continuation[len(continuation)-1].ToolCallID = "other_call"
+	wrongCall := sr.Resolve(req, &oaiReq{Messages: continuation})
+	if !wrongCall.IsNew {
+		t.Fatalf("continuation with unrelated tool call id reused conversation: %+v", wrongCall)
 	}
 }
 

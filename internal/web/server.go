@@ -2993,7 +2993,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 			if body.User != "" && res.ConversationID != "" {
 				s.userSessions.Put(tenantFromRequest(r), body.User, res.ConversationID, res.SessionID, acc.ID)
 			}
-			s.bindConversation(acc, &body, r, res, answerPrompt, startedAt)
+			s.bindToolConversation(acc, &body, r, res, answerPrompt, startedAt, calls)
 			if body.SessionKey != "" {
 				s.sessions.upsert(conversation{ID: body.SessionKey, AccountID: acc.ID, ConversationID: res.ConversationID, SessionID: res.SessionID, Title: prompt})
 			}
@@ -3419,6 +3419,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 				calls = calls[:1]
 			}
 			_ = writeToolResponse(w, id, model, body.Stream, body.shouldSendStreamUsage(), calls, res)
+			s.bindToolConversation(acc, &body, r, res, prompt, startedAt, calls)
 			return
 		}
 	}
@@ -3431,6 +3432,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 				calls = calls[:1]
 			}
 			_ = writeToolResponse(w, id, model, body.Stream, body.shouldSendStreamUsage(), calls, res)
+			s.bindToolConversation(acc, &body, r, res, prompt, startedAt, calls)
 			return
 		}
 	}
@@ -3457,6 +3459,7 @@ func (s *Server) openaiChat(w http.ResponseWriter, r *http.Request) {
 				}
 				calls = limitToolCalls(calls, adaptiveToolCallLimit(calls, configuredToolCallLimit(s.settings)))
 				_ = writeToolResponse(w, id, model, body.Stream, body.shouldSendStreamUsage(), calls, routeRes)
+				s.bindToolConversation(acc, &body, r, res, prompt, startedAt, calls)
 				return
 			}
 		}
@@ -3685,9 +3688,35 @@ func (s *Server) bindConversation(acc auth.AccountToken, body *oaiReq, r *http.R
 		Content:          res.Text,
 		ReasoningContent: res.Reasoning,
 	})
-	s.sessionResolver.Bind(res.SessionID, res.ConversationID, acc.ID, &historyBody, "", r)
+	s.bindConversationHistory(acc, &historyBody, r, res, prompt, startedAt)
+}
+
+func (s *Server) bindToolConversation(acc auth.AccountToken, body *oaiReq, r *http.Request, res chathub.Result, prompt string, startedAt time.Time, calls []detectedToolCall) {
+	if res.ConversationID == "" {
+		return
+	}
+	historyBody := toolCallHistory(body, calls)
+	s.bindConversationHistory(acc, historyBody, r, res, prompt, startedAt)
+}
+
+func toolCallHistory(body *oaiReq, calls []detectedToolCall) *oaiReq {
+	historyBody := *body
+	historyBody.Messages = cloneMessages(body.Messages)
+	toolCalls := toolCallMaps(calls)
+	assistantCalls := make([]map[string]any, 0, len(toolCalls))
+	for _, call := range toolCalls {
+		if item, ok := call.(map[string]any); ok {
+			assistantCalls = append(assistantCalls, item)
+		}
+	}
+	historyBody.Messages = append(historyBody.Messages, oaiMsg{Role: "assistant", ToolCalls: assistantCalls})
+	return &historyBody
+}
+
+func (s *Server) bindConversationHistory(acc auth.AccountToken, body *oaiReq, r *http.Request, res chathub.Result, prompt string, startedAt time.Time) {
+	s.sessionResolver.Bind(res.SessionID, res.ConversationID, acc.ID, body, "", r)
 	if s.contextAffinity != nil {
-		s.contextAffinity.BindConversation(acc.ID, res.ConversationID, res.SessionID, &historyBody, r)
+		s.contextAffinity.BindConversation(acc.ID, res.ConversationID, res.SessionID, body, r)
 	}
 	s.conversationManager.Record(res.ConversationID, acc.ID, prompt)
 	if s.conversationManager.ShouldCleanup() {
