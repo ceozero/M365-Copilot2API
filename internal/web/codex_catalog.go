@@ -70,6 +70,11 @@ var gatewayModels = []modelSpec{
 	{ID: "gpt-5.5-reasoning", Owner: "microsoft-365", Tools: true},
 	{ID: "gpt-5.6", Owner: "microsoft-365", Tools: true},
 	{ID: "gpt-5.6-reasoning", Owner: "microsoft-365", Tools: true},
+	// 兼容 Copilot 客户端中常见的 GPT-5.6 型号名。当前项目尚未验证
+	// 它们各自的独立上游 tone，实际路由在 modelTone 中统一处理。
+	{ID: "gpt-5.6-sol", Owner: "microsoft-365", DisplayName: "GPT-5.6 Sol", DefaultReasoningLevel: "low", Tools: true},
+	{ID: "gpt-5.6-terra", Owner: "microsoft-365", DisplayName: "GPT-5.6 Terra", Tools: true},
+	{ID: "gpt-5.6-luna", Owner: "microsoft-365", DisplayName: "GPT-5.6 Luna", Tools: true},
 	{ID: "gpt-6-sol", Owner: "microsoft-365", DisplayName: "GPT-6 Sol", Tools: true},
 	{ID: "gpt-6.1-sol", Owner: "microsoft-365", DisplayName: "GPT-6.1 Sol", Tools: true},
 	{ID: "gpt-6-reasoning", Owner: "microsoft-365", DisplayName: "GPT-6 Reasoning", Tools: true},

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import {
   LayoutDashboard, ChartLine, Users, KeyRound, MessageSquare,
-  Globe, Settings, LogOut,
+  Globe, FlaskConical, Settings, LogOut,
 } from "lucide-react";
 import { api, isLoggedIn, login, wantsRemember, setRemember as setRememberPref } from "./api";
 import { t, setLocale, getLocale, detectLocale, LOCALES, type Locale } from "./i18n";
@@ -13,6 +13,7 @@ import { AccountsPage } from "./pages/Accounts";
 import { ApiKeysPage } from "./pages/ApiKeys";
 import { ConversationsPage } from "./pages/Conversations";
 import { ProxiesPage } from "./pages/Proxies";
+import { ModelTestPage } from "./pages/ModelTest";
 import { SettingsPage } from "./pages/Settings";
 
 const NAV = [
@@ -22,6 +23,7 @@ const NAV = [
   { id: "apikeys", icon: KeyRound, label: "API Keys" },
   { id: "conversations", icon: MessageSquare, label: "Conversations" },
   { id: "proxies", icon: Globe, label: "Proxy Pool" },
+  { id: "modeltest", icon: FlaskConical, label: "Model Test" },
   { id: "settings", icon: Settings, label: "Settings" },
 ] as const;
 
@@ -126,6 +128,7 @@ export default function App() {
               {page === "apikeys" && <ApiKeysPage push={push} />}
               {page === "conversations" && <ConversationsPage push={push} />}
               {page === "proxies" && <ProxiesPage push={push} />}
+              {page === "modeltest" && <ModelTestPage push={push} />}
               {page === "settings" && <SettingsPage push={push} />}
             </motion.div>
           </AnimatePresence>

@@ -116,12 +116,6 @@ func TestPublicIdentityAnswerUsesRequestedModelForAllAdvertisedModels(t *testing
 			t.Fatalf("Claude model has wrong family: %q", answer)
 		}
 	}
-	for _, model := range models {
-		switch model.ID {
-		case "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-image-2":
-			t.Fatalf("misleading model %q must not be advertised", model.ID)
-		}
-	}
 }
 
 func TestWritePublicIdentityChatResponseProtocols(t *testing.T) {

@@ -1782,6 +1782,10 @@ func modelTone(model string) string {
 		return "Gpt_5_6_Chat"
 	case "gpt-5.6-reasoning", "gpt-5.6-think-deeper":
 		return "Gpt_5_6_Reasoning"
+	// Sol/Terra/Luna 是 Copilot 侧的公开别名；本项目尚未验证对应的
+	// 独立 tone，因此统一走已验证的 GPT-5.6 推理路由。
+	case "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna":
+		return "Gpt_5_6_Reasoning"
 	case "gpt-6", "gpt-6-reasoning", "gpt-6-think-deeper":
 		return "Gpt_6_Reasoning"
 	case "gpt-6-astra", "gpt6-astra":

@@ -172,7 +172,14 @@ func TestModelCatalogAdvertisesFluxImages(t *testing.T) {
 func TestConfiguredModelMappingsDriveCatalogAndRouting(t *testing.T) {
 	mappings := []modelMapping{{PublicModel: "gpt-5.6-sol", UpstreamTone: "Gpt_5_6_Reasoning", DisplayName: "GPT-5.6-Sol", DefaultReasoningLevel: "low"}}
 	models := configuredModelSpecs(mappings)
-	if len(models) != len(gatewayModels)+1 || models[len(models)-1].ID != "gpt-5.6-sol" || models[len(models)-1].DefaultReasoningLevel != "low" {
+	var sol modelSpec
+	for _, model := range models {
+		if model.ID == "gpt-5.6-sol" {
+			sol = model
+			break
+		}
+	}
+	if len(models) != len(gatewayModels) || sol.ID != "gpt-5.6-sol" || sol.DefaultReasoningLevel != "low" {
 		t.Fatalf("configured models=%#v", models)
 	}
 	mapping, ok := configuredModelMapping("GPT-5.6-SOL", mappings)
@@ -183,8 +190,33 @@ func TestConfiguredModelMappingsDriveCatalogAndRouting(t *testing.T) {
 		t.Fatalf("tone=%q ok=%t", tone, ok)
 	}
 	override := configuredModelSpecs([]modelMapping{{PublicModel: "gpt-5.5", UpstreamTone: "Gpt_5_5_Reasoning", DisplayName: "GPT-5.5", DefaultReasoningLevel: "high"}})
-	if len(override) != len(gatewayModels) || override[5].DefaultReasoningLevel != "high" {
+	var gpt55 modelSpec
+	for _, model := range override {
+		if model.ID == "gpt-5.5" {
+			gpt55 = model
+			break
+		}
+	}
+	if len(override) != len(gatewayModels) || gpt55.DefaultReasoningLevel != "high" {
 		t.Fatalf("built-in override=%#v", override)
+	}
+}
+
+func TestGpt56CopilotAliasesAreAdvertisedAndRouted(t *testing.T) {
+	specs := configuredModelSpecs(nil)
+	byID := make(map[string]modelSpec, len(specs))
+	for _, spec := range specs {
+		byID[spec.ID] = spec
+	}
+
+	for _, id := range []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"} {
+		spec, ok := byID[id]
+		if !ok || !spec.Tools {
+			t.Fatalf("missing Copilot alias %q: %#v", id, spec)
+		}
+		if got := modelTone(id); got != "Gpt_5_6_Reasoning" {
+			t.Fatalf("%s routed to %q", id, got)
+		}
 	}
 }
 

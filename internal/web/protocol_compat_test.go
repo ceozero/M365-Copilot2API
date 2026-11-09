@@ -113,7 +113,7 @@ func TestResponsesRequestMetadataAndNewConversation(t *testing.T) {
 }
 
 func TestIsKnownPublicModel(t *testing.T) {
-	if !isKnownPublicModel("gpt-5.5") || !isKnownPublicModel("flux-3") || !isKnownPublicModel("claude") {
+	if !isKnownPublicModel("gpt-5.5") || !isKnownPublicModel("gpt-5.6-sol") || !isKnownPublicModel("gpt-5.6-terra") || !isKnownPublicModel("gpt-5.6-luna") || !isKnownPublicModel("flux-3") || !isKnownPublicModel("claude") {
 		t.Fatal("known model reported unknown")
 	}
 	if isKnownPublicModel("grok-4.6") {
